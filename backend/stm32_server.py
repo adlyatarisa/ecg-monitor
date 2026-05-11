@@ -23,42 +23,64 @@ _NOTCH_SOS    = tf2sos(_b, _a)
 connected_ws: set          = set()
 _serial_task               = None
 _broadcast_task            = None
-_bp_zi: np.ndarray | None  = None
-_notch_zi: np.ndarray | None = None
+_data_queue: asyncio.Queue | None = None
+_bp_zi_ecg: np.ndarray | None  = None
+_notch_zi_ecg: np.ndarray | None = None
+_bp_zi_pcg: np.ndarray | None  = None
+_notch_zi_pcg: np.ndarray | None = None
 CURRENT_PORT: str | None   = None
 CURRENT_BAUD: int          = 115200
 SERIAL_CONNECTED: bool     = False
 
 
 # ─── DSP ─────────────────────────────────────────────────────
-def apply_dsp(samples: list) -> list:
-    global _bp_zi, _notch_zi
+def apply_dsp(samples: list, is_pcg: bool = False) -> list:
+    global _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
     arr = np.array(samples, dtype=np.float64)
-    if _bp_zi is None:
-        _bp_zi    = sosfilt_zi(_BANDPASS_SOS) * arr[0]
-        _notch_zi = sosfilt_zi(_NOTCH_SOS)    * arr[0]
-    out, _bp_zi    = sosfilt(_BANDPASS_SOS, arr, zi=_bp_zi)
-    out, _notch_zi = sosfilt(_NOTCH_SOS,    out, zi=_notch_zi)
+    if not is_pcg:
+        if _bp_zi_ecg is None:
+            _bp_zi_ecg    = sosfilt_zi(_BANDPASS_SOS) * arr[0]
+            _notch_zi_ecg = sosfilt_zi(_NOTCH_SOS)    * arr[0]
+        out, _bp_zi_ecg    = sosfilt(_BANDPASS_SOS, arr, zi=_bp_zi_ecg)
+        out, _notch_zi_ecg = sosfilt(_NOTCH_SOS,    out, zi=_notch_zi_ecg)
+    else:
+        if _bp_zi_pcg is None:
+            _bp_zi_pcg    = sosfilt_zi(_BANDPASS_SOS) * arr[0]
+            _notch_zi_pcg = sosfilt_zi(_NOTCH_SOS)    * arr[0]
+        out, _bp_zi_pcg    = sosfilt(_BANDPASS_SOS, arr, zi=_bp_zi_pcg)
+        out, _notch_zi_pcg = sosfilt(_NOTCH_SOS,    out, zi=_notch_zi_pcg)
     return [round(float(v), 2) for v in out]
 
 
 # ─── Serial Parsing ───────────────────────────────────────────
-def parse_ecg_value(line: str):
+def parse_sensor_values(line: str):
     line = line.strip()
     if not line:
         return None
+        
+    # Check for "ecg,pcg" format
+    if ',' in line:
+        try:
+            parts = line.split(',')
+            return (int(parts[0].strip()), int(parts[1].strip()))
+        except ValueError:
+            pass
+
     if line.startswith('{'):
         try:
             obj = json.loads(line)
-            val = obj.get('ecg') or obj.get('ECG') or obj.get('value')
-            return int(val) if val is not None else None
+            ecg_val = obj.get('ecg') or obj.get('ECG') or obj.get('value')
+            pcg_val = obj.get('pcg') or obj.get('PCG')
+            if ecg_val is not None:
+                return (int(ecg_val), int(pcg_val) if pcg_val is not None else 0)
+            return None
         except Exception:
             pass
     m = re.match(r'^(?:ECG|ecg)\s*:\s*(-?\d+)', line, re.IGNORECASE)
     if m:
-        return int(m.group(1))
+        return (int(m.group(1)), 0)
     try:
-        return int(line)
+        return (int(line), 0)
     except ValueError:
         pass
     return None
@@ -72,12 +94,13 @@ async def serial_reader(queue: asyncio.Queue, port: str, baud: int):
     try:
         ser = serial.Serial(port, baud, timeout=1)
         SERIAL_CONNECTED = True
-        print(f"[STM32] {port} opened.")
+        print(f"[STM32] {port} opened successfully.")
     except serial.SerialException as e:
         print(f"[STM32] FAILED to open {port}: {e}")
         SERIAL_CONNECTED = False
         return
     try:
+        read_count = 0
         while True:
             raw = await loop.run_in_executor(None, ser.readline)
             if not raw:
@@ -86,9 +109,14 @@ async def serial_reader(queue: asyncio.Queue, port: str, baud: int):
                 line = raw.decode('utf-8', errors='ignore')
             except Exception:
                 continue
-            val = parse_ecg_value(line)
-            if val is not None:
-                await queue.put(val)
+            
+            vals = parse_sensor_values(line)
+            if vals is not None:
+                read_count += 1
+                if read_count % 20 == 0:
+                    print(f"[STM32] Read {read_count} samples: ECG={vals[0]}, PCG={vals[1]}")
+                await queue.put(vals)
+    
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -101,25 +129,68 @@ async def serial_reader(queue: asyncio.Queue, port: str, baud: int):
 
 # ─── Broadcast Task ───────────────────────────────────────────
 async def broadcast_worker(queue: asyncio.Queue):
+    global connected_ws
     CHUNK = 10
-    buf   = []
+    buf_ecg = []
+    buf_pcg = []
+    chunk_count = 0
+    print(f"[BROADCAST] Worker started, waiting for data...")
     try:
         while True:
-            val = await queue.get()
-            buf.append(val)
-            if len(buf) >= CHUNK and connected_ws:
-                filtered = apply_dsp(buf)
-                payload  = json.dumps({"stm32_ecg": filtered, "stm32_ecg_raw": buf})
-                dead = set()
-                for ws in list(connected_ws):
-                    try:
-                        await ws.send_str(payload)
-                    except Exception:
-                        dead.add(ws)
-                connected_ws -= dead
-                buf = []
+            ecg_val, pcg_val = await queue.get()
+            buf_ecg.append(ecg_val)
+            buf_pcg.append(pcg_val)
+            
+            if len(buf_ecg) >= CHUNK:
+                chunk_count += 1
+                print(f"[BROADCAST] Chunk #{chunk_count}: {len(buf_ecg)} values, {len(connected_ws)} WS clients")
+                
+                try:
+                    filtered_ecg = apply_dsp(buf_ecg, is_pcg=False)
+                except Exception as e:
+                    print(f"[DSP ECG Error] {e}")
+                    filtered_ecg = buf_ecg
+
+                try:
+                    filtered_pcg = apply_dsp(buf_pcg, is_pcg=True)
+                except Exception as e:
+                    print(f"[DSP PCG Error] {e}")
+                    filtered_pcg = buf_pcg
+
+                import math
+                filtered_ecg = [v if not math.isnan(v) else 0 for v in filtered_ecg]
+                filtered_pcg = [v if not math.isnan(v) else 0 for v in filtered_pcg]
+
+                try:
+                    payload = json.dumps({
+                        "timestamp": asyncio.get_event_loop().time(),
+                        "stm32_ecg": filtered_ecg, 
+                        "stm32_ecg_raw": buf_ecg,
+                        "stm32_pcg": filtered_pcg,
+                        "stm32_pcg_raw": buf_pcg
+                    })
+                except Exception as e:
+                    print(f"[JSON Error] {e}")
+                    payload = None
+
+                if payload and connected_ws:
+                    dead = set()
+                    for ws in list(connected_ws):
+                        try:
+                            await ws.send_str(payload)
+                        except Exception as e:
+                            dead.add(ws)
+                    if dead:
+                        connected_ws -= dead
+                
+                buf_ecg = []
+                buf_pcg = []
     except asyncio.CancelledError:
-        pass
+        print(f"[BROADCAST] Worker cancelled")
+    except Exception as e:
+        print(f"[BROADCAST] FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ─── CORS Middleware ──────────────────────────────────────────
@@ -147,8 +218,8 @@ async def route_ports(request):
 
 async def route_connect(request):
     """POST /connect — start serial with selected port & baud."""
-    global _serial_task, _broadcast_task, _bp_zi, _notch_zi
-    global CURRENT_PORT, CURRENT_BAUD
+    global _serial_task, _broadcast_task, _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
+    global CURRENT_PORT, CURRENT_BAUD, _data_queue
 
     body = await request.json()
     port = body.get('port', '').strip()
@@ -161,15 +232,20 @@ async def route_connect(request):
     for t in [_serial_task, _broadcast_task]:
         if t and not t.done():
             t.cancel()
+            print(f"[CONNECT] Cancelled task: {t}")
+            await asyncio.sleep(0.1)  # Give time for cancellation
 
     # Reset DSP state for new connection
-    _bp_zi = _notch_zi = None
+    _bp_zi_ecg = _notch_zi_ecg = _bp_zi_pcg = _notch_zi_pcg = None
     CURRENT_PORT = port
     CURRENT_BAUD = baud
 
-    q = asyncio.Queue(maxsize=2000)
-    _serial_task    = asyncio.create_task(serial_reader(q, port, baud))
-    _broadcast_task = asyncio.create_task(broadcast_worker(q))
+    # Create GLOBAL queue that persists
+    _data_queue = asyncio.Queue(maxsize=2000)
+    print(f"[CONNECT] Creating serial_reader and broadcast_worker for {port} @ {baud}")
+    _serial_task    = asyncio.create_task(serial_reader(_data_queue, port, baud))
+    _broadcast_task = asyncio.create_task(broadcast_worker(_data_queue))
+    print(f"[CONNECT] Tasks created: serial_task={_serial_task.get_name()}, broadcast_task={_broadcast_task.get_name()}")
 
     return web.json_response({'ok': True, 'port': port, 'baud': baud})
 

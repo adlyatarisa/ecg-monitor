@@ -124,6 +124,7 @@ export default function Dashboard() {
   const [connectedSTM32, setConnectedSTM32] = useState(false);
   const [historicalBuffer, setHistoricalBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [stm32Buffer, setStm32Buffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
+  const [pcgBuffer, setPcgBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
 
   // 1. Fetch Ports
   const fetchPorts = async () => {
@@ -186,18 +187,49 @@ export default function Dashboard() {
     // STM32 Live Socket
     const wsS = new WebSocket(WS_URL_STM32);
     let sBuf = Array(MAX_POINTS).fill(null);
+    let pBuf = Array(MAX_POINTS).fill(null);
     let sIdx = 0;
-    wsS.onopen = () => setConnectedSTM32(true);
+    let pIdx = 0;
+    wsS.onopen = () => {
+      console.log("[WS] STM32 socket opened");
+      setConnectedSTM32(true);
+    };
     wsS.onmessage = (e) => {
-      const payload = JSON.parse(e.data);
-      if (payload.stm32_ecg) {
-        payload.stm32_ecg.forEach((val: number) => {
-          sBuf[sIdx] = val;
-          for (let g = 1; g <= 10; g++) sBuf[(sIdx + g) % MAX_POINTS] = null;
-          sIdx = (sIdx + 1) % MAX_POINTS;
-        });
-        setStm32Buffer([...applyEMA(sBuf, 0.25)]);
+      try {
+        const payload = JSON.parse(e.data);
+        if (payload.timestamp) {
+          console.log(`[WS] Got chunk, timestamp: ${payload.timestamp.toFixed(2)}, ECG[0]: ${payload.stm32_ecg?.[0] || 'none'}`);
+        }
+        
+        const ecgData = payload.stm32_ecg_raw || payload.stm32_ecg;
+        const pcgData = payload.stm32_pcg_raw || payload.stm32_pcg;
+
+        if (ecgData && Array.isArray(ecgData)) {
+          ecgData.forEach((val: number) => {
+            sBuf[sIdx] = val;
+            for (let g = 1; g <= 10; g++) sBuf[(sIdx + g) % MAX_POINTS] = null;
+            sIdx = (sIdx + 1) % MAX_POINTS;
+          });
+          setStm32Buffer([...applyEMA(sBuf, 0.25)]);
+        }
+        if (pcgData && Array.isArray(pcgData)) {
+          pcgData.forEach((val: number) => {
+            pBuf[pIdx] = val;
+            for (let g = 1; g <= 10; g++) pBuf[(pIdx + g) % MAX_POINTS] = null;
+            pIdx = (pIdx + 1) % MAX_POINTS;
+          });
+          setPcgBuffer([...applyEMA(pBuf, 0.25)]);
+        }
+      } catch (err) {
+        console.error("[WS] Parse error:", err);
       }
+    };
+    wsS.onclose = () => {
+      console.log("[WS] STM32 socket closed");
+      setConnectedSTM32(false);
+    };
+    wsS.onerror = (err) => {
+      console.error("[WS] STM32 socket error:", err);
     };
 
     return () => { wsH.close(); wsS.close(); };
@@ -329,8 +361,8 @@ export default function Dashboard() {
         title="STM32 Real-time PCG" 
         subtitle="Phonocardiogram Analysis" 
         live 
-        data={[]} 
-        waiting 
+        data={pcgBuffer} 
+        waiting={!connectedSTM32} 
         className="h-[280px]" 
       />
     </main>

@@ -60,8 +60,8 @@ const pinkChartOptions: ChartOptions<'line'> = {
     x: { display: true, grid: { color: '#fce7f3', lineWidth: 0.4 }, ticks: { display: false } },
     y: {
       display: true,
-      min: -1500,
-      max: 1500,
+      min: -2500,
+      max: 2500,
       grid: { color: '#fce7f3', lineWidth: 0.4 },
       ticks: { color: '#f9a8d4', font: { size: 10, weight: 600 } }
     }

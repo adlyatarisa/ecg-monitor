@@ -110,6 +110,9 @@ async def serial_reader(queue: asyncio.Queue, port: str, baud: int):
             except Exception:
                 continue
             
+            if read_count < 5:
+                print(f"[DEBUG] Raw line {read_count}: {repr(line)}")
+            
             vals = parse_sensor_values(line)
             if vals is not None:
                 read_count += 1

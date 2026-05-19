@@ -14,8 +14,8 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { 
-  Activity, Wifi, WifiOff, RefreshCw, Plug, 
-  ChevronDown, Loader2, AlertCircle, HeartPulse, Stethoscope 
+  Activity, Wifi, RefreshCw, Plug, 
+  ChevronDown, Loader2, AlertCircle
 } from 'lucide-react';
 
 ChartJS.register(
@@ -29,26 +29,14 @@ ChartJS.register(
 );
 
 // ─── Constants & Utils ────────────────────────────────────────────────────────
-const MAX_POINTS = 500;
+const MAX_POINTS = 1500;   // ~3 s window at 500 Hz
 const labels = Array.from({ length: MAX_POINTS }, (_, i) => i);
 const BACKEND = 'http://localhost:8087';
 const WS_URL_STM32 = 'ws://localhost:8087/ws';
 const WS_URL_HISTORICAL = 'ws://localhost:8080';
 const COMMON_BAUDS = [9600, 38400, 115200, 230400];
 
-// EMA Smoothing helper
-function applyEMA(buf: (number | null)[], alpha: number): (number | null)[] {
-  const out: (number | null)[] = new Array(buf.length);
-  let prev: number | null = null;
-  for (let i = 0; i < buf.length; i++) {
-    const v = buf[i];
-    if (v === null) { out[i] = null; prev = null; }
-    else { prev = prev === null ? v : alpha * v + (1 - alpha) * prev; out[i] = prev; }
-  }
-  return out;
-}
-
-const pinkChartOptions: ChartOptions<'line'> = {
+const buildChartOptions = (yMin: number | undefined, yMax: number | undefined): ChartOptions<'line'> => ({
   animation: false,
   responsive: true,
   maintainAspectRatio: false,
@@ -60,29 +48,66 @@ const pinkChartOptions: ChartOptions<'line'> = {
     x: { display: true, grid: { color: '#fce7f3', lineWidth: 0.4 }, ticks: { display: false } },
     y: {
       display: true,
-      min: -2500,
-      max: 2500,
+      min: yMin,
+      max: yMax,
       grid: { color: '#fce7f3', lineWidth: 0.4 },
       ticks: { color: '#f9a8d4', font: { size: 10, weight: 600 } }
     }
   },
   plugins: { legend: { display: false }, tooltip: { enabled: false } }
-};
+});
+
+const ECG_OPTIONS = buildChartOptions(-400, 400);   // filtered ECG, DC removed
+const PCG_OPTIONS = buildChartOptions(-600, 600);   // filtered PCG (20–150 Hz)
+const ECG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
+const PCG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
+const AUTO_OPTIONS = buildChartOptions(undefined, undefined); // auto-scale
+const HISTORICAL_OPTIONS = buildChartOptions(-2500, 2500);
+
+// Compute simple stats for a buffer (ignoring nulls)
+function computeStats(buf: (number | null)[]) {
+  let min = Infinity, max = -Infinity, sum = 0, count = 0;
+  for (const v of buf) {
+    if (v === null || v === undefined) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+    sum += v;
+    count++;
+  }
+  if (count === 0) return { min: 0, max: 0, mean: 0, pp: 0 };
+  return { min, max, mean: sum / count, pp: max - min };
+}
 
 // ─── Reusable Components ──────────────────────────────────────────────────────
-const ChartCard = ({ title, subtitle, live = false, data, waiting = false, className = '' }: any) => (
+const ChartCard = ({ title, subtitle, live = false, data, waiting = false, className = '', options = ECG_OPTIONS, showStats = false }: any) => {
+  const stats = showStats && data ? computeStats(data) : null;
+  // Heuristic: peak-to-peak < 30 counts on raw or < 30 on filtered = sinyal lemah
+  const weak = stats ? stats.pp < 30 : false;
+  return (
   <div className={`bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}>
     <div className="flex justify-between items-start mb-3">
       <div>
         <h3 className="text-[13px] font-bold text-[#831843] m-0 uppercase tracking-wider">{title}</h3>
         <p className="text-[10px] font-semibold text-[#ec4899] mt-[3px]">{subtitle}</p>
       </div>
-      {live && (
-        <div className="flex items-center gap-[5px] text-[10px] font-bold text-[#db2777] tracking-[0.1em]">
-          <div className="w-[7px] h-[7px] rounded-full bg-[#db2777] animate-pulse" />
-          LIVE
-        </div>
-      )}
+      <div className="flex items-center gap-3">
+        {stats && (
+          <div className="flex gap-3 text-[9px] font-bold text-[#831843] tracking-wider">
+            <span>MIN <span className="text-[#db2777]">{stats.min.toFixed(0)}</span></span>
+            <span>MAX <span className="text-[#db2777]">{stats.max.toFixed(0)}</span></span>
+            <span className={weak ? 'text-amber-600' : ''}>
+              P-P <span className={weak ? 'text-amber-600' : 'text-[#db2777]'}>{stats.pp.toFixed(0)}</span>
+              {weak && ' ⚠'}
+            </span>
+          </div>
+        )}
+        {live && (
+          <div className="flex items-center gap-[5px] text-[10px] font-bold text-[#db2777] tracking-[0.1em]">
+            <div className="w-[7px] h-[7px] rounded-full bg-[#db2777] animate-pulse" />
+            LIVE
+          </div>
+        )}
+      </div>
     </div>
     <div className="flex-1 relative w-full min-h-0">
       {waiting ? (
@@ -101,12 +126,13 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
               pointRadius: 0,
             }]
           }}
-          options={pinkChartOptions}
+          options={options}
         />
       )}
     </div>
   </div>
-);
+  );
+};
 
 // ─── Main Dashboard Component ─────────────────────────────────────────────────
 export default function Dashboard() {
@@ -120,11 +146,15 @@ export default function Dashboard() {
   const [connectError, setConnectError] = useState('');
 
   // Data States
-  const [connectedHistorical, setConnectedHistorical] = useState(false);
+  const [, setConnectedHistorical] = useState(false);
   const [connectedSTM32, setConnectedSTM32] = useState(false);
   const [historicalBuffer, setHistoricalBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [stm32Buffer, setStm32Buffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [pcgBuffer, setPcgBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
+  const [stm32RawBuffer, setStm32RawBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
+  const [pcgRawBuffer, setPcgRawBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
+  const [useRaw, setUseRaw] = useState(false);
+  const [autoScale, setAutoScale] = useState(false);
 
   // 1. Fetch Ports
   const fetchPorts = async () => {
@@ -186,10 +216,14 @@ export default function Dashboard() {
 
     // STM32 Live Socket
     const wsS = new WebSocket(WS_URL_STM32);
-    let sBuf = Array(MAX_POINTS).fill(null);
-    let pBuf = Array(MAX_POINTS).fill(null);
+    let sBuf = Array(MAX_POINTS).fill(null);      // filtered ECG
+    let pBuf = Array(MAX_POINTS).fill(null);      // filtered PCG
+    let sRawBuf = Array(MAX_POINTS).fill(null);   // raw ECG
+    let pRawBuf = Array(MAX_POINTS).fill(null);   // raw PCG
     let sIdx = 0;
     let pIdx = 0;
+    let sRawIdx = 0;
+    let pRawIdx = 0;
     wsS.onopen = () => {
       console.log("[WS] STM32 socket opened");
       setConnectedSTM32(true);
@@ -200,25 +234,45 @@ export default function Dashboard() {
         if (payload.timestamp) {
           console.log(`[WS] Got chunk, timestamp: ${payload.timestamp.toFixed(2)}, ECG[0]: ${payload.stm32_ecg?.[0] || 'none'}`);
         }
-        
-        const ecgData = payload.stm32_ecg_raw || payload.stm32_ecg;
-        const pcgData = payload.stm32_pcg_raw || payload.stm32_pcg;
 
-        if (ecgData && Array.isArray(ecgData)) {
-          ecgData.forEach((val: number) => {
+        // Filtered data (bandpass + notch + Kalman)
+        const ecgFiltered = payload.stm32_ecg;
+        const pcgFiltered = payload.stm32_pcg;
+        // Raw ADC data
+        const ecgRaw = payload.stm32_ecg_raw;
+        const pcgRaw = payload.stm32_pcg_raw;
+
+        if (ecgFiltered && Array.isArray(ecgFiltered)) {
+          ecgFiltered.forEach((val: number) => {
             sBuf[sIdx] = val;
-            for (let g = 1; g <= 10; g++) sBuf[(sIdx + g) % MAX_POINTS] = null;
+            sBuf[(sIdx + 1) % MAX_POINTS] = null;
             sIdx = (sIdx + 1) % MAX_POINTS;
           });
-          setStm32Buffer([...applyEMA(sBuf, 0.25)]);
+          setStm32Buffer([...sBuf]);
         }
-        if (pcgData && Array.isArray(pcgData)) {
-          pcgData.forEach((val: number) => {
+        if (ecgRaw && Array.isArray(ecgRaw)) {
+          ecgRaw.forEach((val: number) => {
+            sRawBuf[sRawIdx] = val;
+            sRawBuf[(sRawIdx + 1) % MAX_POINTS] = null;
+            sRawIdx = (sRawIdx + 1) % MAX_POINTS;
+          });
+          setStm32RawBuffer([...sRawBuf]);
+        }
+        if (pcgFiltered && Array.isArray(pcgFiltered)) {
+          pcgFiltered.forEach((val: number) => {
             pBuf[pIdx] = val;
-            for (let g = 1; g <= 10; g++) pBuf[(pIdx + g) % MAX_POINTS] = null;
+            pBuf[(pIdx + 1) % MAX_POINTS] = null;
             pIdx = (pIdx + 1) % MAX_POINTS;
           });
-          setPcgBuffer([...applyEMA(pBuf, 0.25)]);
+          setPcgBuffer([...pBuf]);
+        }
+        if (pcgRaw && Array.isArray(pcgRaw)) {
+          pcgRaw.forEach((val: number) => {
+            pRawBuf[pRawIdx] = val;
+            pRawBuf[(pRawIdx + 1) % MAX_POINTS] = null;
+            pRawIdx = (pRawIdx + 1) % MAX_POINTS;
+          });
+          setPcgRawBuffer([...pRawBuf]);
         }
       } catch (err) {
         console.error("[WS] Parse error:", err);
@@ -318,6 +372,19 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex gap-2">
+          <button 
+            onClick={() => setUseRaw(!useRaw)}
+            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${useRaw ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-[#db2777] bg-[#fff0f5] border-[#fbcfe8]'}`}
+          >
+            {useRaw ? 'RAW' : 'FILTERED'}
+          </button>
+          <button 
+            onClick={() => setAutoScale(!autoScale)}
+            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${autoScale ? 'text-blue-600 bg-blue-50 border-blue-200' : 'text-[#db2777] bg-[#fff0f5] border-[#fbcfe8]'}`}
+            title="Toggle Y-axis auto-scaling"
+          >
+            {autoScale ? 'AUTO Y' : 'FIXED Y'}
+          </button>
           <div className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border ${connectedSTM32 ? 'text-green-600 bg-green-50 border-green-100' : 'text-red-500 bg-red-50 border-red-100'}`}>
             <Wifi size={12} /> {connectedSTM32 ? 'DEVICE LIVE' : 'DEVICE OFFLINE'}
           </div>
@@ -330,6 +397,7 @@ export default function Dashboard() {
           title="Historical Reference" 
           subtitle="Baseline Signal Pattern" 
           data={historicalBuffer} 
+          options={HISTORICAL_OPTIONS}
           className="flex-[3]" 
         />
         <div className="flex-[1] bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl p-6 flex flex-col justify-between">
@@ -351,17 +419,21 @@ export default function Dashboard() {
 
       <ChartCard 
         title="STM32 Real-time ECG" 
-        subtitle="Electrocardiogram Analysis" 
+        subtitle={useRaw ? "Raw ADC (unfiltered)" : "Electrocardiogram Analysis (Kalman filtered)"} 
         live 
-        data={stm32Buffer} 
+        data={useRaw ? stm32RawBuffer : stm32Buffer} 
+        options={autoScale ? AUTO_OPTIONS : (useRaw ? ECG_RAW_OPTIONS : ECG_OPTIONS)}
+        showStats
         className="h-[280px]" 
       />
 
       <ChartCard 
         title="STM32 Real-time PCG" 
-        subtitle="Phonocardiogram Analysis" 
+        subtitle={useRaw ? "Raw ADC (unfiltered)" : "Phonocardiogram Analysis (Kalman filtered)"} 
         live 
-        data={pcgBuffer} 
+        data={useRaw ? pcgRawBuffer : pcgBuffer} 
+        options={autoScale ? AUTO_OPTIONS : (useRaw ? PCG_RAW_OPTIONS : PCG_OPTIONS)}
+        showStats
         waiting={!connectedSTM32} 
         className="h-[280px]" 
       />

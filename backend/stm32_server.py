@@ -10,14 +10,65 @@ from aiohttp import web
 # ─── Server Config ────────────────────────────────────────────
 SERVER_HOST = 'localhost'
 SERVER_PORT = 8087
-SAMPLE_RATE = 200          # Hz
+SAMPLE_RATE = 500          # Hz — must match TIM2 ISR rate on STM32
 
 COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800]
 
 # ─── DSP Filters (designed once at startup) ──────────────────
-_BANDPASS_SOS = butter(4, [0.5, 40.0], btype='band', fs=SAMPLE_RATE, output='sos')
-_b, _a        = iirnotch(w0=50.0, Q=30.0, fs=SAMPLE_RATE)
-_NOTCH_SOS    = tf2sos(_b, _a)
+# ECG: bandpass 0.5–40 Hz (jantung listrik) + notch 50 Hz (PLN)
+_ECG_BANDPASS_SOS = butter(4, [0.5, 40.0], btype='band', fs=SAMPLE_RATE, output='sos')
+# PCG: bandpass 20–150 Hz (jantung akustik S1/S2) + notch 50 Hz
+_PCG_BANDPASS_SOS = butter(4, [20.0, 150.0], btype='band', fs=SAMPLE_RATE, output='sos')
+_b, _a            = iirnotch(w0=50.0, Q=30.0, fs=SAMPLE_RATE)
+_NOTCH_SOS        = tf2sos(_b, _a)
+
+# ─── Kalman Filter (1D, scalar) ───────────────────────────────
+class KalmanFilter1D:
+    """
+    Simple 1D Kalman filter for real-time signal denoising.
+    
+    Model:
+      x[k] = x[k-1] + w,   w ~ N(0, Q)   (process noise — how much signal can change per sample)
+      z[k] = x[k]   + v,   v ~ N(0, R)   (measurement noise — sensor noise level)
+    
+    Tuning:
+      - Higher Q → trusts measurement more → less smoothing, preserves fast transients (QRS peaks)
+      - Higher R → trusts prediction more → more smoothing, may blunt sharp peaks
+      - Ratio R/Q is what matters. For ECG: Q=0.05, R=1.0 works well.
+    """
+    def __init__(self, Q: float = 0.05, R: float = 1.0):
+        self.Q = Q          # process noise covariance
+        self.R = R          # measurement noise covariance
+        self.x_hat = 0.0    # state estimate
+        self.P = 1.0        # estimate covariance
+        self._initialized = False
+
+    def reset(self):
+        self.x_hat = 0.0
+        self.P = 1.0
+        self._initialized = False
+
+    def update(self, z: float) -> float:
+        if not self._initialized:
+            self.x_hat = z
+            self.P = 1.0
+            self._initialized = True
+            return z
+        # Predict
+        x_pred = self.x_hat
+        P_pred = self.P + self.Q
+        # Update (Kalman gain)
+        K = P_pred / (P_pred + self.R)
+        self.x_hat = x_pred + K * (z - x_pred)
+        self.P = (1 - K) * P_pred
+        return self.x_hat
+
+    def filter_array(self, arr: np.ndarray) -> np.ndarray:
+        out = np.empty_like(arr)
+        for i in range(len(arr)):
+            out[i] = self.update(arr[i])
+        return out
+
 
 # ─── Runtime State ────────────────────────────────────────────
 connected_ws: set          = set()
@@ -28,6 +79,9 @@ _bp_zi_ecg: np.ndarray | None  = None
 _notch_zi_ecg: np.ndarray | None = None
 _bp_zi_pcg: np.ndarray | None  = None
 _notch_zi_pcg: np.ndarray | None = None
+# Kalman filter instances (persist across chunks for continuity)
+_kalman_ecg: KalmanFilter1D | None = None
+_kalman_pcg: KalmanFilter1D | None = None
 CURRENT_PORT: str | None   = None
 CURRENT_BAUD: int          = 115200
 SERIAL_CONNECTED: bool     = False
@@ -36,19 +90,26 @@ SERIAL_CONNECTED: bool     = False
 # ─── DSP ─────────────────────────────────────────────────────
 def apply_dsp(samples: list, is_pcg: bool = False) -> list:
     global _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
+    global _kalman_ecg, _kalman_pcg
     arr = np.array(samples, dtype=np.float64)
     if not is_pcg:
         if _bp_zi_ecg is None:
-            _bp_zi_ecg    = sosfilt_zi(_BANDPASS_SOS) * arr[0]
-            _notch_zi_ecg = sosfilt_zi(_NOTCH_SOS)    * arr[0]
-        out, _bp_zi_ecg    = sosfilt(_BANDPASS_SOS, arr, zi=_bp_zi_ecg)
-        out, _notch_zi_ecg = sosfilt(_NOTCH_SOS,    out, zi=_notch_zi_ecg)
+            _bp_zi_ecg    = sosfilt_zi(_ECG_BANDPASS_SOS) * arr[0]
+            _notch_zi_ecg = sosfilt_zi(_NOTCH_SOS)        * arr[0]
+            # ECG Kalman: Q=0.05 preserves QRS peaks, R=1.0 smooths baseline wander residual
+            _kalman_ecg   = KalmanFilter1D(Q=0.05, R=1.0)
+        out, _bp_zi_ecg    = sosfilt(_ECG_BANDPASS_SOS, arr,  zi=_bp_zi_ecg)
+        out, _notch_zi_ecg = sosfilt(_NOTCH_SOS,        out,  zi=_notch_zi_ecg)
+        out = _kalman_ecg.filter_array(out)
     else:
         if _bp_zi_pcg is None:
-            _bp_zi_pcg    = sosfilt_zi(_BANDPASS_SOS) * arr[0]
-            _notch_zi_pcg = sosfilt_zi(_NOTCH_SOS)    * arr[0]
-        out, _bp_zi_pcg    = sosfilt(_BANDPASS_SOS, arr, zi=_bp_zi_pcg)
-        out, _notch_zi_pcg = sosfilt(_NOTCH_SOS,    out, zi=_notch_zi_pcg)
+            _bp_zi_pcg    = sosfilt_zi(_PCG_BANDPASS_SOS) * arr[0]
+            _notch_zi_pcg = sosfilt_zi(_NOTCH_SOS)        * arr[0]
+            # PCG Kalman: Q=0.1 (PCG has faster transients S1/S2), R=0.8
+            _kalman_pcg   = KalmanFilter1D(Q=0.1, R=0.8)
+        out, _bp_zi_pcg    = sosfilt(_PCG_BANDPASS_SOS, arr,  zi=_bp_zi_pcg)
+        out, _notch_zi_pcg = sosfilt(_NOTCH_SOS,        out,  zi=_notch_zi_pcg)
+        out = _kalman_pcg.filter_array(out)
     return [round(float(v), 2) for v in out]
 
 
@@ -222,6 +283,7 @@ async def route_ports(request):
 async def route_connect(request):
     """POST /connect — start serial with selected port & baud."""
     global _serial_task, _broadcast_task, _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
+    global _kalman_ecg, _kalman_pcg
     global CURRENT_PORT, CURRENT_BAUD, _data_queue
 
     body = await request.json()
@@ -240,6 +302,7 @@ async def route_connect(request):
 
     # Reset DSP state for new connection
     _bp_zi_ecg = _notch_zi_ecg = _bp_zi_pcg = _notch_zi_pcg = None
+    _kalman_ecg = _kalman_pcg = None
     CURRENT_PORT = port
     CURRENT_BAUD = baud
 
@@ -290,7 +353,7 @@ def create_app():
 
 
 if __name__ == '__main__':
-    print(f"[DSP]  Band-pass [0.5–40 Hz] + Notch [50 Hz] @ {SAMPLE_RATE} Hz")
+    print(f"[DSP]  Band-pass ECG[0.5–40 Hz] PCG[20–150 Hz] + Notch [50 Hz] + Kalman @ {SAMPLE_RATE} Hz")
     print(f"[HTTP] GET  http://{SERVER_HOST}:{SERVER_PORT}/ports")
     print(f"[HTTP] POST http://{SERVER_HOST}:{SERVER_PORT}/connect")
     print(f"[HTTP] GET  http://{SERVER_HOST}:{SERVER_PORT}/status")

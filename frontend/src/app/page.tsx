@@ -15,7 +15,7 @@ import {
 import { Line } from 'react-chartjs-2';
 import { 
   Activity, Wifi, RefreshCw, Plug, 
-  ChevronDown, Loader2, AlertCircle
+  ChevronDown, Loader2, AlertCircle, TrendingUp
 } from 'lucide-react';
 
 ChartJS.register(
@@ -45,20 +45,20 @@ const buildChartOptions = (yMin: number | undefined, yMax: number | undefined): 
     line: { borderWidth: 1.5, tension: 0.1 }
   },
   scales: {
-    x: { display: true, grid: { color: '#fce7f3', lineWidth: 0.4 }, ticks: { display: false } },
+    x: { display: true, grid: { color: '#dbeafe', lineWidth: 0.4 }, ticks: { display: false } },
     y: {
       display: true,
       min: yMin,
       max: yMax,
-      grid: { color: '#fce7f3', lineWidth: 0.4 },
-      ticks: { color: '#f9a8d4', font: { size: 10, weight: 600 } }
+      grid: { color: '#dbeafe', lineWidth: 0.4 },
+      ticks: { color: '#93c5fd', font: { size: 10, weight: 600 } }
     }
   },
   plugins: { legend: { display: false }, tooltip: { enabled: false } }
 });
 
-const ECG_OPTIONS = buildChartOptions(-400, 400);   // filtered ECG, DC removed
-const PCG_OPTIONS = buildChartOptions(-600, 600);   // filtered PCG (20–150 Hz)
+const ECG_OPTIONS = buildChartOptions(-2500, 2500);  // matched to historical reference range
+const PCG_OPTIONS = buildChartOptions(-2500, 2500);  // matched to historical reference range
 const ECG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
 const PCG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
 const AUTO_OPTIONS = buildChartOptions(undefined, undefined); // auto-scale
@@ -125,15 +125,15 @@ function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number 
 
 /** Map Pearson |r| to a risk label and color */
 function riskFromCorrelation(r: number): { pct: number; label: string; color: string } {
-  if (isNaN(r)) return { pct: 0, label: 'INSUFFICIENT DATA', color: '#9ca3af' };
+  if (isNaN(r)) return { pct: 0, label: 'Insufficient Data', color: '#9ca3af' };
   // |r| close to 1 = healthy (matches reference) → low risk
   // |r| close to 0 = abnormal (no match)           → high risk
   const absR = Math.abs(r);
   const riskPct = Math.round((1 - absR) * 100);
-  if (riskPct <= 25)      return { pct: riskPct, label: 'LOW RISK CORRELATION',      color: '#16a34a' };
-  if (riskPct <= 50)      return { pct: riskPct, label: 'MODERATE RISK CORRELATION', color: '#ca8a04' };
-  if (riskPct <= 75)      return { pct: riskPct, label: 'HIGH RISK CORRELATION',     color: '#ea580c' };
-  return                          { pct: riskPct, label: 'VERY HIGH RISK',           color: '#dc2626' };
+  if (riskPct <= 25)      return { pct: riskPct, label: 'Low Risk',      color: '#2563eb' };
+  if (riskPct <= 50)      return { pct: riskPct, label: 'Moderate Risk', color: '#ca8a04' };
+  if (riskPct <= 75)      return { pct: riskPct, label: 'High Risk',     color: '#ea580c' };
+  return                          { pct: riskPct, label: 'Very High Risk', color: '#dc2626' };
 }
 
 // ─── Reusable Components ──────────────────────────────────────────────────────
@@ -142,26 +142,26 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
   // Heuristic: peak-to-peak < 30 counts on raw or < 30 on filtered = sinyal lemah
   const weak = stats ? stats.pp < 30 : false;
   return (
-  <div className={`bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}>
+  <div className={`bg-[#f0f9ff] border border-[#bfdbfe] rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}>
     <div className="flex justify-between items-start mb-3">
       <div>
-        <h3 className="text-[13px] font-bold text-[#831843] m-0 uppercase tracking-wider">{title}</h3>
-        <p className="text-[10px] font-semibold text-[#ec4899] mt-[3px]">{subtitle}</p>
+        <h3 className="text-[13px] font-bold text-[#1e3a8a] m-0 uppercase tracking-wider">{title}</h3>
+        <p className="text-[10px] font-semibold text-[#3b82f6] mt-[3px]">{subtitle}</p>
       </div>
       <div className="flex items-center gap-3">
         {stats && (
-          <div className="flex gap-3 text-[9px] font-bold text-[#831843] tracking-wider">
-            <span>MIN <span className="text-[#db2777]">{stats.min.toFixed(0)}</span></span>
-            <span>MAX <span className="text-[#db2777]">{stats.max.toFixed(0)}</span></span>
+          <div className="flex gap-3 text-[9px] font-bold text-[#1e3a8a] tracking-wider">
+            <span>MIN <span className="text-[#2563eb]">{stats.min.toFixed(0)}</span></span>
+            <span>MAX <span className="text-[#2563eb]">{stats.max.toFixed(0)}</span></span>
             <span className={weak ? 'text-amber-600' : ''}>
-              P-P <span className={weak ? 'text-amber-600' : 'text-[#db2777]'}>{stats.pp.toFixed(0)}</span>
+              P-P <span className={weak ? 'text-amber-600' : 'text-[#2563eb]'}>{stats.pp.toFixed(0)}</span>
               {weak && ' ⚠'}
             </span>
           </div>
         )}
         {live && (
-          <div className="flex items-center gap-[5px] text-[10px] font-bold text-[#db2777] tracking-[0.1em]">
-            <div className="w-[7px] h-[7px] rounded-full bg-[#db2777] animate-pulse" />
+          <div className="flex items-center gap-[5px] text-[10px] font-bold text-[#2563eb] tracking-[0.1em]">
+            <div className="w-[7px] h-[7px] rounded-full bg-[#2563eb] animate-pulse" />
             LIVE
           </div>
         )}
@@ -170,7 +170,7 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
     <div className="flex-1 relative w-full min-h-0">
       {waiting ? (
         <div className="absolute inset-0 flex flex-center justify-center items-center">
-          <span className="text-[12px] font-semibold text-[#f9a8d4]">Waiting for stream...</span>
+          <span className="text-[12px] font-semibold text-[#93c5fd]">Waiting for stream...</span>
         </div>
       ) : (
         <Line
@@ -178,7 +178,7 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
             labels,
             datasets: [{
               data,
-              borderColor: '#db2777',
+              borderColor: '#2563eb',
               borderWidth: 1.8,
               tension: 0.4,
               pointRadius: 0,
@@ -354,48 +354,48 @@ export default function Dashboard() {
     return () => { wsH.close(); wsS.close(); };
   }, [setupDone]);
 
-  // ─── UI: SETUP SCREEN (PINK THEME) ──────────────────────────
+  // ─── UI: SETUP SCREEN (BLUE THEME) ──────────────────────────
   if (!setupDone) {
     return (
-      <div className="min-h-screen bg-[#fff5f8] flex items-center justify-center p-6">
-        <div className="bg-white rounded-3xl shadow-xl border border-[#fbcfe8] w-full max-w-md overflow-hidden">
-          <div className="bg-gradient-to-r from-[#db2777] to-[#ec4899] px-8 py-8 text-white">
+      <div className="min-h-screen bg-[#f0f9ff] flex items-center justify-center p-6">
+        <div className="bg-white rounded-3xl shadow-xl border border-[#bfdbfe] w-full max-w-md overflow-hidden">
+          <div className="bg-gradient-to-r from-[#2563eb] to-[#3b82f6] px-8 py-8 text-white">
             <div className="flex items-center gap-3 mb-2">
               <Activity size={24} />
               <h1 className="text-xl font-bold tracking-tight">System Configuration</h1>
             </div>
-            <p className="text-pink-100 text-[11px] opacity-90">Select hardware port to begin monitoring</p>
+            <p className="text-blue-100 text-[11px] opacity-90">Select hardware port to begin monitoring</p>
           </div>
 
           <div className="p-8 space-y-6">
             <div>
-              <label className="block text-[10px] font-bold text-[#831843] uppercase tracking-widest mb-3">Serial Port</label>
+              <label className="block text-[10px] font-bold text-[#1e3a8a] uppercase tracking-widest mb-3">Serial Port</label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <select 
                     value={selectedPort} 
                     onChange={e => setSelectedPort(e.target.value)}
-                    className="w-full appearance-none pl-4 pr-10 py-3 border border-[#fbcfe8] rounded-xl text-sm text-[#831843] bg-[#fff0f5] focus:ring-2 focus:ring-[#f472b6] outline-none transition-all"
+                    className="w-full appearance-none pl-4 pr-10 py-3 border border-[#bfdbfe] rounded-xl text-sm text-[#1e3a8a] bg-[#f0f9ff] focus:ring-2 focus:ring-[#60a5fa] outline-none transition-all"
                   >
                     <option value="">Choose Port...</option>
                     {ports.map(p => <option key={p.port} value={p.port}>{p.port}</option>)}
                   </select>
-                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#ec4899]" />
+                  <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#3b82f6]" />
                 </div>
-                <button onClick={fetchPorts} className="p-3 border border-[#fbcfe8] rounded-xl text-[#ec4899] hover:bg-[#fce7f3] transition-all">
+                <button onClick={fetchPorts} className="p-3 border border-[#bfdbfe] rounded-xl text-[#3b82f6] hover:bg-[#dbeafe] transition-all">
                   {portsLoading ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
                 </button>
               </div>
             </div>
 
             <div>
-              <label className="block text-[10px] font-bold text-[#831843] uppercase tracking-widest mb-3">Baud Rate</label>
+              <label className="block text-[10px] font-bold text-[#1e3a8a] uppercase tracking-widest mb-3">Baud Rate</label>
               <div className="grid grid-cols-4 gap-2">
                 {COMMON_BAUDS.map(b => (
                   <button 
                     key={b} 
                     onClick={() => setSelectedBaud(b)}
-                    className={`py-2 rounded-lg text-[10px] font-bold border transition-all ${selectedBaud === b ? 'bg-[#db2777] border-[#db2777] text-white' : 'bg-white border-[#fbcfe8] text-[#ec4899] hover:bg-[#fff0f5]'}`}
+                    className={`py-2 rounded-lg text-[10px] font-bold border transition-all ${selectedBaud === b ? 'bg-[#2563eb] border-[#2563eb] text-white' : 'bg-white border-[#bfdbfe] text-[#3b82f6] hover:bg-[#f0f9ff]'}`}
                   >
                     {b >= 1000 ? `${b/1000}K` : b}
                   </button>
@@ -412,7 +412,7 @@ export default function Dashboard() {
             <button 
               onClick={connectDevice} 
               disabled={connecting || !selectedPort}
-              className="w-full py-4 rounded-2xl text-sm font-bold text-white bg-gradient-to-r from-[#db2777] to-[#ec4899] hover:opacity-90 disabled:opacity-30 transition-all flex justify-center items-center gap-2"
+              className="w-full py-4 rounded-2xl text-sm font-bold text-white bg-gradient-to-r from-[#2563eb] to-[#3b82f6] hover:opacity-90 disabled:opacity-30 transition-all flex justify-center items-center gap-2"
             >
               {connecting ? <Loader2 size={18} className="animate-spin" /> : <Plug size={18} />}
               Connect to {selectedPort || 'Device'}
@@ -423,29 +423,29 @@ export default function Dashboard() {
     );
   }
 
-  // ─── UI: DASHBOARD (PINK THEME) ─────────────────────────────
+  // ─── UI: DASHBOARD (BLUE THEME) ─────────────────────────────
   return (
     <main className="min-h-screen bg-white font-sans p-6 md:p-8 flex flex-col gap-5">
-      <header className="flex justify-between items-center bg-[#fff0f5] border border-[#fbcfe8] p-4 rounded-2xl">
+      <header className="flex justify-between items-center bg-[#f0f9ff] border border-[#bfdbfe] p-4 rounded-2xl">
         <div className="flex items-center gap-3">
-          <div className="bg-[#db2777] p-2 rounded-xl text-white">
+          <div className="bg-[#2563eb] p-2 rounded-xl text-white">
             <Activity size={20} />
           </div>
           <div>
-            <h2 className="text-[14px] font-black text-[#831843] leading-none uppercase">Heartify</h2>
-            <p className="text-[10px] font-bold text-[#ec4899] mt-1 uppercase tracking-tighter">{selectedPort} @ {selectedBaud} BAUD</p>
+            <h2 className="text-[14px] font-black text-[#1e3a8a] leading-none uppercase">Smart Stretcher</h2>
+            <p className="text-[10px] font-bold text-[#3b82f6] mt-1 uppercase tracking-tighter">{selectedPort} @ {selectedBaud} BAUD</p>
           </div>
         </div>
         <div className="flex gap-2">
           <button 
             onClick={() => setUseRaw(!useRaw)}
-            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${useRaw ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-[#db2777] bg-[#fff0f5] border-[#fbcfe8]'}`}
+            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${useRaw ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-[#2563eb] bg-[#f0f9ff] border-[#bfdbfe]'}`}
           >
             {useRaw ? 'RAW' : 'FILTERED'}
           </button>
           <button 
             onClick={() => setAutoScale(!autoScale)}
-            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${autoScale ? 'text-blue-600 bg-blue-50 border-blue-200' : 'text-[#db2777] bg-[#fff0f5] border-[#fbcfe8]'}`}
+            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${autoScale ? 'text-indigo-600 bg-indigo-50 border-indigo-200' : 'text-[#2563eb] bg-[#f0f9ff] border-[#bfdbfe]'}`}
             title="Toggle Y-axis auto-scaling"
           >
             {autoScale ? 'AUTO Y' : 'FIXED Y'}
@@ -453,63 +453,72 @@ export default function Dashboard() {
           <div className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border ${connectedSTM32 ? 'text-green-600 bg-green-50 border-green-100' : 'text-red-500 bg-red-50 border-red-100'}`}>
             <Wifi size={12} /> {connectedSTM32 ? 'DEVICE LIVE' : 'DEVICE OFFLINE'}
           </div>
-          <button onClick={() => setSetupDone(false)} className="text-[10px] font-bold text-[#ec4899] border border-[#fbcfe8] px-3 py-1.5 rounded-full hover:bg-[#fff0f5]">DISCONNECT</button>
+          <button onClick={() => setSetupDone(false)} className="text-[10px] font-bold text-[#3b82f6] border border-[#bfdbfe] px-3 py-1.5 rounded-full hover:bg-[#e0f2fe]">DISCONNECT</button>
         </div>
       </header>
 
-      <div className="flex gap-4 items-stretch h-[280px]">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <ChartCard 
           title="Historical Reference" 
-          subtitle="Baseline Signal Pattern" 
+          subtitle="Baseline Pattern" 
           data={historicalBuffer} 
           options={HISTORICAL_OPTIONS}
-          className="flex-[3]" 
+          className="h-[360px]" 
         />
-        <div className="flex-[1] bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl p-6 flex flex-col justify-between">
+        <ChartCard 
+          title="STM32 Real-time ECG" 
+          subtitle={useRaw ? "Raw ADC" : "Electrocardiogram"} 
+          live 
+          data={useRaw ? stm32RawBuffer : stm32Buffer} 
+          options={autoScale ? AUTO_OPTIONS : (useRaw ? ECG_RAW_OPTIONS : ECG_OPTIONS)}
+          showStats
+          waiting={!connectedSTM32}
+          className="h-[360px]" 
+        />
+        <ChartCard 
+          title="STM32 Real-time PCG" 
+          subtitle={useRaw ? "Raw ADC" : "Phonocardiogram"} 
+          live 
+          data={useRaw ? pcgRawBuffer : pcgBuffer} 
+          options={autoScale ? AUTO_OPTIONS : (useRaw ? PCG_RAW_OPTIONS : PCG_OPTIONS)}
+          showStats
+          waiting={!connectedSTM32} 
+          className="h-[360px]" 
+        />
+        <div className="bg-[#f0f9ff] border border-[#bfdbfe] rounded-2xl p-6 flex flex-col justify-between h-[360px]">
           <div>
-            <p className="text-[12px] font-bold text-[#ec4899] uppercase tracking-wider">Stroke Risk</p>
-            <div className="flex items-baseline gap-1 mt-3">
-              <span className="text-[60px] font-black text-[#831843]">{risk.pct}</span>
-              <span className="text-[26px] font-extrabold text-[#831843]">%</span>
+            <div className="flex items-center gap-2">
+              <TrendingUp size={20} className="text-[#2563eb]" />
+              <p className="text-[14px] font-bold text-[#1e3a8a] uppercase tracking-wider">Stroke Risk Correlation</p>
             </div>
-            <p className="text-[10px] font-semibold text-[#be185d] mt-1">
-              Pearson r = {isNaN(pearsonR) ? '—' : pearsonR.toFixed(4)}
-            </p>
+            <p className="text-[11px] text-[#3b82f6] mt-1">Real-time Analysis</p>
+            
+            <div className="flex items-center gap-3 mt-8">
+              <div className="flex items-baseline gap-1">
+                <span className="text-[72px] font-black text-[#1e3a8a] leading-none">{risk.pct}</span>
+                <span className="text-[32px] font-extrabold text-[#1e3a8a] leading-none">%</span>
+              </div>
+              <div className="flex flex-col ml-2">
+                 <span className="text-[18px] font-bold text-[#1e3a8a]">{risk.label}</span>
+                 <span className="text-[11px] text-[#3b82f6]">Classification Level</span>
+              </div>
+            </div>
           </div>
-          <div className="space-y-2">
-            <div className="h-[10px] w-full rounded-full bg-[#fce7f3] overflow-hidden">
+          <div className="space-y-3">
+            <div className="h-[12px] w-full rounded-full bg-[#dbeafe] overflow-hidden">
               <div
                 className="h-full rounded-full transition-all duration-500"
                 style={{ width: `${risk.pct}%`, backgroundColor: risk.color }}
               />
             </div>
-            <p className="text-[10px] font-bold text-right uppercase" style={{ color: risk.color }}>
-              {risk.label}
-            </p>
+            <div className="flex justify-between text-[10px] font-bold text-[#3b82f6]">
+               <span>0%</span>
+               <span>50%</span>
+               <span>100%</span>
+            </div>
           </div>
         </div>
       </div>
-
-      <ChartCard 
-        title="STM32 Real-time ECG" 
-        subtitle={useRaw ? "Raw ADC (unfiltered)" : "Electrocardiogram Analysis (Kalman filtered)"} 
-        live 
-        data={useRaw ? stm32RawBuffer : stm32Buffer} 
-        options={autoScale ? AUTO_OPTIONS : (useRaw ? ECG_RAW_OPTIONS : ECG_OPTIONS)}
-        showStats
-        className="h-[280px]" 
-      />
-
-      <ChartCard 
-        title="STM32 Real-time PCG" 
-        subtitle={useRaw ? "Raw ADC (unfiltered)" : "Phonocardiogram Analysis (Kalman filtered)"} 
-        live 
-        data={useRaw ? pcgRawBuffer : pcgBuffer} 
-        options={autoScale ? AUTO_OPTIONS : (useRaw ? PCG_RAW_OPTIONS : PCG_OPTIONS)}
-        showStats
-        waiting={!connectedSTM32} 
-        className="h-[280px]" 
-      />
     </main>
   );
 }

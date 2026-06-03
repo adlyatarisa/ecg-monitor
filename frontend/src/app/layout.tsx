@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Heartify",
+  title: "Smart Stretcher",
   description: "Real-time ECG signal monitoring dashboard",
 };
 

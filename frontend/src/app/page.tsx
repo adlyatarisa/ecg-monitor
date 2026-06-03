@@ -28,8 +28,8 @@ ChartJS.register(
   Filler
 );
 
-// ─── Constants & Utils ────────────────────────────────────────────────────────
-const MAX_POINTS = 1500;   // ~3 s window at 500 Hz
+// ─── Constants & Utils 
+const MAX_POINTS = 1500;  
 const labels = Array.from({ length: MAX_POINTS }, (_, i) => i);
 const BACKEND = 'http://localhost:8087';
 const WS_URL_STM32 = 'ws://localhost:8087/ws';
@@ -78,16 +78,9 @@ function computeStats(buf: (number | null)[]) {
   return { min, max, mean: sum / count, pp: max - min };
 }
 
-/**
- * Pearson Correlation Coefficient between two buffers.
- * r = Σ((xi - x̄)(yi - ȳ)) / √(Σ(xi - x̄)² · Σ(yi - ȳ)²)
- * Only pairs where BOTH values are non-null are included.
- * Returns NaN if fewer than 2 valid pairs or zero variance.
- */
 function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number {
   const n = Math.min(a.length, b.length);
 
-  // Step 1: collect valid pairs
   const xs: number[] = [];
   const ys: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -98,7 +91,6 @@ function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number 
   }
   if (xs.length < 2) return NaN;
 
-  // Step 2: compute means
   let sumX = 0, sumY = 0;
   for (let i = 0; i < xs.length; i++) {
     sumX += xs[i];
@@ -107,7 +99,6 @@ function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number 
   const meanX = sumX / xs.length;
   const meanY = sumY / ys.length;
 
-  // Step 3: compute covariance and standard deviations
   let cov = 0, varX = 0, varY = 0;
   for (let i = 0; i < xs.length; i++) {
     const dx = xs[i] - meanX;
@@ -117,17 +108,12 @@ function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number 
     varY += dy * dy;
   }
 
-  // Avoid division by zero (constant signal = no variance)
   if (varX === 0 || varY === 0) return NaN;
 
   return cov / Math.sqrt(varX * varY);
 }
-
-/** Map Pearson |r| to a risk label and color */
 function riskFromCorrelation(r: number): { pct: number; label: string; color: string } {
-  if (isNaN(r)) return { pct: 0, label: 'Insufficient Data', color: '#9ca3af' };
-  // |r| close to 1 = healthy (matches reference) → low risk
-  // |r| close to 0 = abnormal (no match)           → high risk
+  if (isNaN(r)) return { pct: 0, label: 'INSUFFICIENT DATA', color: '#9ca3af' };
   const absR = Math.abs(r);
   const riskPct = Math.round((1 - absR) * 100);
   if (riskPct <= 25)      return { pct: riskPct, label: 'Low Risk',      color: '#2563eb' };
@@ -136,10 +122,9 @@ function riskFromCorrelation(r: number): { pct: number; label: string; color: st
   return                          { pct: riskPct, label: 'Very High Risk', color: '#dc2626' };
 }
 
-// ─── Reusable Components ──────────────────────────────────────────────────────
+//  Reusable Components 
 const ChartCard = ({ title, subtitle, live = false, data, waiting = false, className = '', options = ECG_OPTIONS, showStats = false }: any) => {
   const stats = showStats && data ? computeStats(data) : null;
-  // Heuristic: peak-to-peak < 30 counts on raw or < 30 on filtered = sinyal lemah
   const weak = stats ? stats.pp < 30 : false;
   return (
   <div className={`bg-[#f0f9ff] border border-[#bfdbfe] rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}>
@@ -192,9 +177,7 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
   );
 };
 
-// ─── Main Dashboard Component ─────────────────────────────────────────────────
 export default function Dashboard() {
-  // Setup States
   const [setupDone, setSetupDone] = useState(true);
   const [ports, setPorts] = useState<{port: string, description: string}[]>([]);
   const [selectedPort, setSelectedPort] = useState('');
@@ -354,7 +337,6 @@ export default function Dashboard() {
     return () => { wsH.close(); wsS.close(); };
   }, [setupDone]);
 
-  // ─── UI: SETUP SCREEN (BLUE THEME) ──────────────────────────
   if (!setupDone) {
     return (
       <div className="min-h-screen bg-[#f0f9ff] flex items-center justify-center p-6">
@@ -423,7 +405,6 @@ export default function Dashboard() {
     );
   }
 
-  // ─── UI: DASHBOARD (BLUE THEME) ─────────────────────────────
   return (
     <main className="min-h-screen bg-white font-sans p-6 md:p-8 flex flex-col gap-5">
       <header className="flex justify-between items-center bg-[#f0f9ff] border border-[#bfdbfe] p-4 rounded-2xl">

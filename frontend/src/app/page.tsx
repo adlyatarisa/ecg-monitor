@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -78,6 +78,64 @@ function computeStats(buf: (number | null)[]) {
   return { min, max, mean: sum / count, pp: max - min };
 }
 
+/**
+ * Pearson Correlation Coefficient between two buffers.
+ * r = Σ((xi - x̄)(yi - ȳ)) / √(Σ(xi - x̄)² · Σ(yi - ȳ)²)
+ * Only pairs where BOTH values are non-null are included.
+ * Returns NaN if fewer than 2 valid pairs or zero variance.
+ */
+function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number {
+  const n = Math.min(a.length, b.length);
+
+  // Step 1: collect valid pairs
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (a[i] !== null && a[i] !== undefined && b[i] !== null && b[i] !== undefined) {
+      xs.push(a[i] as number);
+      ys.push(b[i] as number);
+    }
+  }
+  if (xs.length < 2) return NaN;
+
+  // Step 2: compute means
+  let sumX = 0, sumY = 0;
+  for (let i = 0; i < xs.length; i++) {
+    sumX += xs[i];
+    sumY += ys[i];
+  }
+  const meanX = sumX / xs.length;
+  const meanY = sumY / ys.length;
+
+  // Step 3: compute covariance and standard deviations
+  let cov = 0, varX = 0, varY = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const dx = xs[i] - meanX;
+    const dy = ys[i] - meanY;
+    cov  += dx * dy;
+    varX += dx * dx;
+    varY += dy * dy;
+  }
+
+  // Avoid division by zero (constant signal = no variance)
+  if (varX === 0 || varY === 0) return NaN;
+
+  return cov / Math.sqrt(varX * varY);
+}
+
+/** Map Pearson |r| to a risk label and color */
+function riskFromCorrelation(r: number): { pct: number; label: string; color: string } {
+  if (isNaN(r)) return { pct: 0, label: 'INSUFFICIENT DATA', color: '#9ca3af' };
+  // |r| close to 1 = healthy (matches reference) → low risk
+  // |r| close to 0 = abnormal (no match)           → high risk
+  const absR = Math.abs(r);
+  const riskPct = Math.round((1 - absR) * 100);
+  if (riskPct <= 25)      return { pct: riskPct, label: 'LOW RISK CORRELATION',      color: '#16a34a' };
+  if (riskPct <= 50)      return { pct: riskPct, label: 'MODERATE RISK CORRELATION', color: '#ca8a04' };
+  if (riskPct <= 75)      return { pct: riskPct, label: 'HIGH RISK CORRELATION',     color: '#ea580c' };
+  return                          { pct: riskPct, label: 'VERY HIGH RISK',           color: '#dc2626' };
+}
+
 // ─── Reusable Components ──────────────────────────────────────────────────────
 const ChartCard = ({ title, subtitle, live = false, data, waiting = false, className = '', options = ECG_OPTIONS, showStats = false }: any) => {
   const stats = showStats && data ? computeStats(data) : null;
@@ -137,7 +195,7 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
 // ─── Main Dashboard Component ─────────────────────────────────────────────────
 export default function Dashboard() {
   // Setup States
-  const [setupDone, setSetupDone] = useState(false);
+  const [setupDone, setSetupDone] = useState(true);
   const [ports, setPorts] = useState<{port: string, description: string}[]>([]);
   const [selectedPort, setSelectedPort] = useState('');
   const [selectedBaud, setSelectedBaud] = useState(115200);
@@ -155,6 +213,13 @@ export default function Dashboard() {
   const [pcgRawBuffer, setPcgRawBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [useRaw, setUseRaw] = useState(false);
   const [autoScale, setAutoScale] = useState(false);
+
+  // ─── Pearson Correlation (Historical Reference ↔ STM32 PCG) ───
+  const pearsonR = useMemo(
+    () => pearsonCorrelation(historicalBuffer, pcgBuffer),
+    [historicalBuffer, pcgBuffer]
+  );
+  const risk = useMemo(() => riskFromCorrelation(pearsonR), [pearsonR]);
 
   // 1. Fetch Ports
   const fetchPorts = async () => {
@@ -404,15 +469,23 @@ export default function Dashboard() {
           <div>
             <p className="text-[12px] font-bold text-[#ec4899] uppercase tracking-wider">Stroke Risk</p>
             <div className="flex items-baseline gap-1 mt-3">
-              <span className="text-[60px] font-black text-[#831843]">23</span>
+              <span className="text-[60px] font-black text-[#831843]">{risk.pct}</span>
               <span className="text-[26px] font-extrabold text-[#831843]">%</span>
             </div>
+            <p className="text-[10px] font-semibold text-[#be185d] mt-1">
+              Pearson r = {isNaN(pearsonR) ? '—' : pearsonR.toFixed(4)}
+            </p>
           </div>
           <div className="space-y-2">
             <div className="h-[10px] w-full rounded-full bg-[#fce7f3] overflow-hidden">
-              <div className="h-full bg-gradient-to-r from-[#f472b6] to-[#db2777]" style={{ width: '23%' }} />
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${risk.pct}%`, backgroundColor: risk.color }}
+              />
             </div>
-            <p className="text-[10px] font-bold text-[#db2777] text-right uppercase">Low Risk Correlation</p>
+            <p className="text-[10px] font-bold text-right uppercase" style={{ color: risk.color }}>
+              {risk.label}
+            </p>
           </div>
         </div>
       </div>

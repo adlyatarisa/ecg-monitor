@@ -7,22 +7,21 @@ import numpy as np
 from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
 from aiohttp import web
 
-# ─── Server Config ────────────────────────────────────────────
+#  Server Config 
 SERVER_HOST = 'localhost'
 SERVER_PORT = 8087
-SAMPLE_RATE = 500          # Hz — must match TIM2 ISR rate on STM32
+SAMPLE_RATE = 500          
 
 COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800]
 
-# ─── DSP Filters (designed once at startup) ──────────────────
-# ECG: bandpass 0.5–40 Hz (jantung listrik) + notch 50 Hz (PLN)
+# DSP Filters
+# ECG: bandpass 0.5–40 Hz + notch 50 Hz
 _ECG_BANDPASS_SOS = butter(4, [0.5, 40.0], btype='band', fs=SAMPLE_RATE, output='sos')
-# PCG: bandpass 20–150 Hz (jantung akustik S1/S2) + notch 50 Hz
 _PCG_BANDPASS_SOS = butter(4, [20.0, 150.0], btype='band', fs=SAMPLE_RATE, output='sos')
 _b, _a            = iirnotch(w0=50.0, Q=30.0, fs=SAMPLE_RATE)
 _NOTCH_SOS        = tf2sos(_b, _a)
 
-# ─── Kalman Filter (1D, scalar) ───────────────────────────────
+#  Kalman Filter (1D, scalar)
 class KalmanFilter1D:
     """
     Simple 1D Kalman filter for real-time signal denoising.
@@ -70,7 +69,7 @@ class KalmanFilter1D:
         return out
 
 
-# ─── Runtime State ────────────────────────────────────────────
+#  Runtime State
 connected_ws: set          = set()
 _serial_task               = None
 _broadcast_task            = None
@@ -79,7 +78,7 @@ _bp_zi_ecg: np.ndarray | None  = None
 _notch_zi_ecg: np.ndarray | None = None
 _bp_zi_pcg: np.ndarray | None  = None
 _notch_zi_pcg: np.ndarray | None = None
-# Kalman filter instances (persist across chunks for continuity)
+# Kalman filter instances
 _kalman_ecg: KalmanFilter1D | None = None
 _kalman_pcg: KalmanFilter1D | None = None
 CURRENT_PORT: str | None   = None
@@ -87,7 +86,7 @@ CURRENT_BAUD: int          = 115200
 SERIAL_CONNECTED: bool     = False
 
 
-# ─── DSP ─────────────────────────────────────────────────────
+# DSP 
 def apply_dsp(samples: list, is_pcg: bool = False) -> list:
     global _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
     global _kalman_ecg, _kalman_pcg
@@ -96,7 +95,6 @@ def apply_dsp(samples: list, is_pcg: bool = False) -> list:
         if _bp_zi_ecg is None:
             _bp_zi_ecg    = sosfilt_zi(_ECG_BANDPASS_SOS) * arr[0]
             _notch_zi_ecg = sosfilt_zi(_NOTCH_SOS)        * arr[0]
-            # ECG Kalman: Q=0.05 preserves QRS peaks, R=1.0 smooths baseline wander residual
             _kalman_ecg   = KalmanFilter1D(Q=0.05, R=1.0)
         out, _bp_zi_ecg    = sosfilt(_ECG_BANDPASS_SOS, arr,  zi=_bp_zi_ecg)
         out, _notch_zi_ecg = sosfilt(_NOTCH_SOS,        out,  zi=_notch_zi_ecg)
@@ -105,7 +103,6 @@ def apply_dsp(samples: list, is_pcg: bool = False) -> list:
         if _bp_zi_pcg is None:
             _bp_zi_pcg    = sosfilt_zi(_PCG_BANDPASS_SOS) * arr[0]
             _notch_zi_pcg = sosfilt_zi(_NOTCH_SOS)        * arr[0]
-            # PCG Kalman: Q=0.1 (PCG has faster transients S1/S2), R=0.8
             _kalman_pcg   = KalmanFilter1D(Q=0.1, R=0.8)
         out, _bp_zi_pcg    = sosfilt(_PCG_BANDPASS_SOS, arr,  zi=_bp_zi_pcg)
         out, _notch_zi_pcg = sosfilt(_NOTCH_SOS,        out,  zi=_notch_zi_pcg)
@@ -113,7 +110,7 @@ def apply_dsp(samples: list, is_pcg: bool = False) -> list:
     return [round(float(v), 2) for v in out]
 
 
-# ─── Serial Parsing ───────────────────────────────────────────
+#  Serial Parsing
 def parse_sensor_values(line: str):
     line = line.strip()
     if not line:
@@ -147,7 +144,7 @@ def parse_sensor_values(line: str):
     return None
 
 
-# ─── Serial Reader Task ───────────────────────────────────────
+#  Serial Reader Task
 async def serial_reader(queue: asyncio.Queue, port: str, baud: int):
     global SERIAL_CONNECTED
     loop = asyncio.get_event_loop()
@@ -191,7 +188,7 @@ async def serial_reader(queue: asyncio.Queue, port: str, baud: int):
         print(f"[STM32] {port} closed.")
 
 
-# ─── Broadcast Task ───────────────────────────────────────────
+#  Broadcast Task
 async def broadcast_worker(queue: asyncio.Queue):
     global connected_ws
     CHUNK = 10
@@ -257,7 +254,7 @@ async def broadcast_worker(queue: asyncio.Queue):
         traceback.print_exc()
 
 
-# ─── CORS Middleware ──────────────────────────────────────────
+#  CORS Middleware
 @web.middleware
 async def cors_mw(request, handler):
     if request.method == 'OPTIONS':
@@ -270,7 +267,7 @@ async def cors_mw(request, handler):
     return resp
 
 
-# ─── HTTP Routes ──────────────────────────────────────────────
+#  HTTP Routes
 async def route_ports(request):
     """GET /ports — list available COM ports + supported baud rates."""
     ports = [
@@ -293,20 +290,17 @@ async def route_connect(request):
     if not port:
         return web.json_response({'error': 'port is required'}, status=400)
 
-    # Cancel previous serial/broadcast tasks
     for t in [_serial_task, _broadcast_task]:
         if t and not t.done():
             t.cancel()
             print(f"[CONNECT] Cancelled task: {t}")
-            await asyncio.sleep(0.1)  # Give time for cancellation
+            await asyncio.sleep(0.1)  
 
-    # Reset DSP state for new connection
     _bp_zi_ecg = _notch_zi_ecg = _bp_zi_pcg = _notch_zi_pcg = None
     _kalman_ecg = _kalman_pcg = None
     CURRENT_PORT = port
     CURRENT_BAUD = baud
 
-    # Create GLOBAL queue that persists
     _data_queue = asyncio.Queue(maxsize=2000)
     print(f"[CONNECT] Creating serial_reader and broadcast_worker for {port} @ {baud}")
     _serial_task    = asyncio.create_task(serial_reader(_data_queue, port, baud))
@@ -333,20 +327,18 @@ async def route_ws(request):
     connected_ws.add(ws)
     print(f"[WS] Client connected. Total: {len(connected_ws)}")
     async for _ in ws:
-        pass  # clients are receive-only
+        pass
     connected_ws.discard(ws)
     print(f"[WS] Client disconnected. Total: {len(connected_ws)}")
     return ws
 
 
-# ─── App Factory ──────────────────────────────────────────────
 def create_app():
     app = web.Application(middlewares=[cors_mw])
     app.router.add_get('/ports',   route_ports)
     app.router.add_post('/connect', route_connect)
     app.router.add_get('/status',  route_status)
     app.router.add_get('/ws',      route_ws)
-    # OPTIONS preflight
     for path in ['/ports', '/connect', '/status']:
         app.router.add_route('OPTIONS', path, lambda r: web.Response(status=200))
     return app

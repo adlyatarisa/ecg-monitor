@@ -367,7 +367,7 @@ export default function Dashboard() {
             <Activity size={20} />
           </div>
           <div>
-            <h2 className="text-[14px] font-black text-[#831843] leading-none uppercase">Medical Dashboard</h2>
+            <h2 className="text-[14px] font-black text-[#831843] leading-none uppercase">Heartify</h2>
             <p className="text-[10px] font-bold text-[#ec4899] mt-1 uppercase tracking-tighter">{selectedPort} @ {selectedBaud} BAUD</p>
           </div>
         </div>

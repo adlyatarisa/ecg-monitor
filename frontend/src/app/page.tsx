@@ -178,7 +178,7 @@ const ChartCard = ({ title, subtitle, live = false, data, waiting = false, class
 };
 
 export default function Dashboard() {
-  const [setupDone, setSetupDone] = useState(true);
+  const [setupDone, setSetupDone] = useState(false);
   const [ports, setPorts] = useState<{port: string, description: string}[]>([]);
   const [selectedPort, setSelectedPort] = useState('');
   const [selectedBaud, setSelectedBaud] = useState(115200);

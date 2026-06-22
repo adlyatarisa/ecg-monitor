@@ -435,13 +435,6 @@ export default function Dashboard() {
   const [useRaw, setUseRaw] = useState(false);
   const [autoScale, setAutoScale] = useState(false);
 
-  // ─── Pearson Correlation (Historical Reference ↔ STM32 PCG) ───
-  const pearsonR = useMemo(
-    () => pearsonCorrelation(historicalBuffer, pcgBuffer),
-    [historicalBuffer, pcgBuffer]
-  );
-  const risk = useMemo(() => riskFromCorrelation(pearsonR), [pearsonR]);
-
   // ─── FFT Computation (Sliding Window 3s) ───
   const historicalFFT = useMemo(
     () => computeFFTMagnitude(historicalBuffer, SAMPLE_RATE_HISTORICAL, 100),
@@ -456,10 +449,21 @@ export default function Dashboard() {
     [useRaw, pcgRawBuffer, pcgBuffer]
   );
 
+  // ─── Pearson Correlation (FFT Historical ↔ FFT PCG) ───
+  const pearsonR = useMemo(() => {
+    const hMag = historicalFFT.magnitudes;
+    const pMag = pcgFFT.magnitudes;
+    if (hMag.length === 0 || pMag.length === 0) return NaN;
+    // Align to the shorter array length for valid comparison
+    const len = Math.min(hMag.length, pMag.length);
+    return pearsonCorrelation(hMag.slice(0, len), pMag.slice(0, len));
+  }, [historicalFFT, pcgFFT]);
+  const risk = useMemo(() => riskFromCorrelation(pearsonR), [pearsonR]);
+
   // FFT chart options (memoized)
-  const historicalFFTOptions = useMemo(() => buildFFTChartOptions('#7c3aed', 100), []);
-  const ecgFFTOptions = useMemo(() => buildFFTChartOptions('#059669', 50), []);
-  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#d97706', 200), []);
+  const historicalFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 100), []);
+  const ecgFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 50), []);
+  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 200), []);
 
   // 1. Fetch Ports
   const fetchPorts = async () => {
@@ -708,9 +712,9 @@ export default function Dashboard() {
           title="Historical FFT"
           subtitle="Frequency Spectrum · Window 3s · 0–100 Hz"
           fftData={historicalFFT}
-          accentColor="#7c3aed"
-          bgColor="#f5f3ff"
-          borderColor="#c4b5fd"
+          accentColor="#2563eb"
+          bgColor="#f0f9ff"
+          borderColor="#bfdbfe"
           chartOptions={historicalFFTOptions}
           className="h-[300px]"
         />
@@ -732,9 +736,9 @@ export default function Dashboard() {
           title="ECG FFT"
           subtitle={`Frequency Spectrum · Window 3s · 0–50 Hz${useRaw ? ' · Raw' : ''}`}
           fftData={ecgFFT}
-          accentColor="#059669"
-          bgColor="#ecfdf5"
-          borderColor="#6ee7b7"
+          accentColor="#2563eb"
+          bgColor="#f0f9ff"
+          borderColor="#bfdbfe"
           chartOptions={ecgFFTOptions}
           waiting={!connectedSTM32}
           className="h-[300px]"
@@ -757,9 +761,9 @@ export default function Dashboard() {
           title="PCG FFT"
           subtitle={`Frequency Spectrum · Window 3s · 0–200 Hz${useRaw ? ' · Raw' : ''}`}
           fftData={pcgFFT}
-          accentColor="#d97706"
-          bgColor="#fffbeb"
-          borderColor="#fcd34d"
+          accentColor="#2563eb"
+          bgColor="#f0f9ff"
+          borderColor="#bfdbfe"
           chartOptions={pcgFFTOptions}
           waiting={!connectedSTM32}
           className="h-[300px]"
@@ -773,7 +777,7 @@ export default function Dashboard() {
             <TrendingUp size={20} className="text-[#2563eb]" />
             <p className="text-[14px] font-bold text-[#1e3a8a] uppercase tracking-wider">Stroke Risk Correlation</p>
           </div>
-          <p className="text-[11px] text-[#3b82f6] mt-1">Real-time Analysis</p>
+          <p className="text-[11px] text-[#3b82f6] mt-1">FFT Spectrum Correlation · Historical ↔ PCG</p>
 
           <div className="flex items-center gap-3 mt-6">
             <div className="flex items-baseline gap-1">

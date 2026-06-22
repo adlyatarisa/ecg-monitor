@@ -13,8 +13,8 @@ import {
   type ChartOptions
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
-import { 
-  Activity, Wifi, RefreshCw, Plug, 
+import {
+  Activity, Wifi, RefreshCw, Plug,
   ChevronDown, Loader2, AlertCircle
 } from 'lucide-react';
 
@@ -29,12 +29,16 @@ ChartJS.register(
 );
 
 // ─── Constants & Utils 
-const MAX_POINTS = 1500;  
+const MAX_POINTS = 1500;
 const labels = Array.from({ length: MAX_POINTS }, (_, i) => i);
 const BACKEND = 'http://localhost:8087';
 const WS_URL_STM32 = 'ws://localhost:8087/ws';
 const WS_URL_HISTORICAL = 'ws://localhost:8080';
 const COMMON_BAUDS = [9600, 38400, 115200, 230400];
+
+// ─── Sample Rates ───
+const SAMPLE_RATE_STM32 = 500;       // STM32 ECG/PCG at 500 Hz
+const SAMPLE_RATE_HISTORICAL = 200;  // Historical data downsampled to 200 Hz
 
 const buildChartOptions = (yMin: number | undefined, yMax: number | undefined): ChartOptions<'line'> => ({
   animation: false,
@@ -103,7 +107,7 @@ function pearsonCorrelation(a: (number | null)[], b: (number | null)[]): number 
   for (let i = 0; i < xs.length; i++) {
     const dx = xs[i] - meanX;
     const dy = ys[i] - meanY;
-    cov  += dx * dy;
+    cov += dx * dy;
     varX += dx * dx;
     varY += dy * dy;
   }
@@ -116,70 +120,273 @@ function riskFromCorrelation(r: number): { pct: number; label: string; color: st
   if (isNaN(r)) return { pct: 0, label: 'INSUFFICIENT DATA', color: '#9ca3af' };
   const absR = Math.abs(r);
   const riskPct = Math.round((1 - absR) * 100);
-  if (riskPct <= 25)      return { pct: riskPct, label: 'LOW RISK CORRELATION',      color: '#16a34a' };
-  if (riskPct <= 50)      return { pct: riskPct, label: 'MODERATE RISK CORRELATION', color: '#ca8a04' };
-  if (riskPct <= 75)      return { pct: riskPct, label: 'HIGH RISK CORRELATION',     color: '#ea580c' };
-  return                          { pct: riskPct, label: 'VERY HIGH RISK',           color: '#dc2626' };
+  if (riskPct <= 25) return { pct: riskPct, label: 'LOW RISK CORRELATION', color: '#16a34a' };
+  if (riskPct <= 50) return { pct: riskPct, label: 'MODERATE RISK CORRELATION', color: '#ca8a04' };
+  if (riskPct <= 75) return { pct: riskPct, label: 'HIGH RISK CORRELATION', color: '#ea580c' };
+  return { pct: riskPct, label: 'VERY HIGH RISK', color: '#dc2626' };
 }
+
+// ─── FFT (Cooley-Tukey Radix-2) ───
+function fftRadix2(re: number[], im: number[]): void {
+  const n = re.length;
+  if (n <= 1) return;
+
+  // Bit-reversal permutation
+  let j = 0;
+  for (let i = 1; i < n; i++) {
+    let bit = n >> 1;
+    while (j & bit) {
+      j ^= bit;
+      bit >>= 1;
+    }
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+
+  // Cooley-Tukey butterfly
+  for (let len = 2; len <= n; len <<= 1) {
+    const halfLen = len >> 1;
+    const angle = (-2 * Math.PI) / len;
+    const wRe = Math.cos(angle);
+    const wIm = Math.sin(angle);
+    for (let i = 0; i < n; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let k = 0; k < halfLen; k++) {
+        const tRe = curRe * re[i + k + halfLen] - curIm * im[i + k + halfLen];
+        const tIm = curRe * im[i + k + halfLen] + curIm * re[i + k + halfLen];
+        re[i + k + halfLen] = re[i + k] - tRe;
+        im[i + k + halfLen] = im[i + k] - tIm;
+        re[i + k] += tRe;
+        im[i + k] += tIm;
+        const newCurRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = newCurRe;
+      }
+    }
+  }
+}
+
+// Next power of 2
+function nextPow2(n: number): number {
+  let p = 1;
+  while (p < n) p <<= 1;
+  return p;
+}
+
+interface FFTResult {
+  freqs: number[];
+  magnitudes: number[];
+  peakFreq: number;
+  peakMag: number;
+}
+
+function computeFFTMagnitude(
+  buffer: (number | null)[],
+  sampleRate: number,
+  maxFreq?: number
+): FFTResult {
+  const windowSamples = Math.min(sampleRate * 3, buffer.length);
+  const signal: number[] = [];
+  for (let i = buffer.length - windowSamples; i < buffer.length; i++) {
+    signal.push(buffer[i] ?? 0);
+  }
+  const hasData = signal.some(v => v !== 0);
+  if (!hasData) return { freqs: [], magnitudes: [], peakFreq: 0, peakMag: 0 };
+
+  // Remove DC offset
+  let sum = 0;
+  for (const v of signal) sum += v;
+  const mean = sum / signal.length;
+  for (let i = 0; i < signal.length; i++) signal[i] -= mean;
+
+  // Hanning window
+  const N = signal.length;
+  for (let i = 0; i < N; i++) {
+    signal[i] *= 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+  }
+
+  // Zero-pad to next power of 2
+  const nfft = nextPow2(N);
+  const re = new Array(nfft).fill(0);
+  const im = new Array(nfft).fill(0);
+  for (let i = 0; i < N; i++) re[i] = signal[i];
+
+  fftRadix2(re, im);
+
+  const halfN = nfft >> 1;
+  const freqResolution = sampleRate / nfft;
+  const cutoffBin = maxFreq ? Math.min(Math.floor(maxFreq / freqResolution), halfN) : halfN;
+
+  const freqs: number[] = [];
+  const magnitudes: number[] = [];
+  let peakFreq = 0, peakMag = 0;
+
+  for (let i = 1; i <= cutoffBin; i++) {
+    const freq = i * freqResolution;
+    const mag = (2 / N) * Math.sqrt(re[i] * re[i] + im[i] * im[i]);
+    freqs.push(Math.round(freq * 10) / 10);
+    magnitudes.push(Math.round(mag * 100) / 100);
+    if (mag > peakMag) { peakMag = mag; peakFreq = freq; }
+  }
+
+  return {
+    freqs,
+    magnitudes,
+    peakFreq: Math.round(peakFreq * 10) / 10,
+    peakMag: Math.round(peakMag * 100) / 100
+  };
+}
+
+// ─── FFT Chart Options Builder ───
+const buildFFTChartOptions = (accentColor: string, maxFreq: number): ChartOptions<'line'> => ({
+  animation: false,
+  responsive: true,
+  maintainAspectRatio: false,
+  elements: { point: { radius: 0 }, line: { borderWidth: 1.5, tension: 0.2 } },
+  scales: {
+    x: {
+      display: true,
+      type: 'linear',
+      min: 0,
+      max: maxFreq,
+      grid: { color: `${accentColor}15`, lineWidth: 0.4 },
+      ticks: { color: accentColor, font: { size: 9, weight: 600 }, maxTicksLimit: 10, callback: (v: any) => `${v}` },
+      title: { display: true, text: 'Frequency (Hz)', color: accentColor, font: { size: 9, weight: 'bold' as const } }
+    },
+    y: {
+      display: true,
+      grid: { color: `${accentColor}15`, lineWidth: 0.4 },
+      ticks: { color: accentColor, font: { size: 9, weight: 600 }, maxTicksLimit: 5 },
+      title: { display: true, text: 'Magnitude', color: accentColor, font: { size: 9, weight: 'bold' as const } }
+    }
+  },
+  plugins: { legend: { display: false }, tooltip: { enabled: false } }
+});
 
 //  Reusable Components 
 const ChartCard = ({ title, subtitle, live = false, data, waiting = false, className = '', options = ECG_OPTIONS, showStats = false }: any) => {
   const stats = showStats && data ? computeStats(data) : null;
   const weak = stats ? stats.pp < 30 : false;
   return (
-  <div className={`bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}>
-    <div className="flex justify-between items-start mb-3">
-      <div>
-        <h3 className="text-[13px] font-bold text-[#831843] m-0 uppercase tracking-wider">{title}</h3>
-        <p className="text-[10px] font-semibold text-[#ec4899] mt-[3px]">{subtitle}</p>
-      </div>
-      <div className="flex items-center gap-3">
-        {stats && (
-          <div className="flex gap-3 text-[9px] font-bold text-[#831843] tracking-wider">
-            <span>MIN <span className="text-[#db2777]">{stats.min.toFixed(0)}</span></span>
-            <span>MAX <span className="text-[#db2777]">{stats.max.toFixed(0)}</span></span>
-            <span className={weak ? 'text-amber-600' : ''}>
-              P-P <span className={weak ? 'text-amber-600' : 'text-[#db2777]'}>{stats.pp.toFixed(0)}</span>
-              {weak && ' ⚠'}
-            </span>
-          </div>
-        )}
-        {live && (
-          <div className="flex items-center gap-[5px] text-[10px] font-bold text-[#db2777] tracking-[0.1em]">
-            <div className="w-[7px] h-[7px] rounded-full bg-[#db2777] animate-pulse" />
-            LIVE
-          </div>
-        )}
-      </div>
-    </div>
-    <div className="flex-1 relative w-full min-h-0">
-      {waiting ? (
-        <div className="absolute inset-0 flex flex-center justify-center items-center">
-          <span className="text-[12px] font-semibold text-[#f9a8d4]">Waiting for stream...</span>
+    <div className={`bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}>
+      <div className="flex justify-between items-start mb-3">
+        <div>
+          <h3 className="text-[13px] font-bold text-[#831843] m-0 uppercase tracking-wider">{title}</h3>
+          <p className="text-[10px] font-semibold text-[#ec4899] mt-[3px]">{subtitle}</p>
         </div>
-      ) : (
-        <Line
-          data={{
-            labels,
-            datasets: [{
-              data,
-              borderColor: '#db2777',
-              borderWidth: 1.8,
-              tension: 0.4,
-              pointRadius: 0,
-            }]
-          }}
-          options={options}
-        />
-      )}
+        <div className="flex items-center gap-3">
+          {stats && (
+            <div className="flex gap-3 text-[9px] font-bold text-[#831843] tracking-wider">
+              <span>MIN <span className="text-[#db2777]">{stats.min.toFixed(0)}</span></span>
+              <span>MAX <span className="text-[#db2777]">{stats.max.toFixed(0)}</span></span>
+              <span className={weak ? 'text-amber-600' : ''}>
+                P-P <span className={weak ? 'text-amber-600' : 'text-[#db2777]'}>{stats.pp.toFixed(0)}</span>
+                {weak && ' ⚠'}
+              </span>
+            </div>
+          )}
+          {live && (
+            <div className="flex items-center gap-[5px] text-[10px] font-bold text-[#db2777] tracking-[0.1em]">
+              <div className="w-[7px] h-[7px] rounded-full bg-[#db2777] animate-pulse" />
+              LIVE
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="flex-1 relative w-full min-h-0">
+        {waiting ? (
+          <div className="absolute inset-0 flex flex-center justify-center items-center">
+            <span className="text-[12px] font-semibold text-[#f9a8d4]">Waiting for stream...</span>
+          </div>
+        ) : (
+          <Line
+            data={{
+              labels,
+              datasets: [{
+                data,
+                borderColor: '#db2777',
+                borderWidth: 1.8,
+                tension: 0.4,
+                pointRadius: 0,
+              }]
+            }}
+            options={options}
+          />
+        )}
+      </div>
     </div>
-  </div>
+  );
+};
+
+// ─── FFT Chart Card ───
+const FFTChartCard = ({ title, subtitle, fftData, accentColor, bgColor, borderColor, chartOptions, waiting = false, className = '' }: {
+  title: string;
+  subtitle: string;
+  fftData: FFTResult;
+  accentColor: string;
+  bgColor: string;
+  borderColor: string;
+  chartOptions: ChartOptions<'line'>;
+  waiting?: boolean;
+  className?: string;
+}) => {
+  const hasData = fftData.freqs.length > 0;
+  return (
+    <div className={`rounded-2xl px-5 pt-5 pb-4 flex flex-col relative ${className}`}
+      style={{ backgroundColor: bgColor, border: `1px solid ${borderColor}` }}>
+      <div className="flex justify-between items-start mb-3">
+        <div>
+          <h3 className="text-[13px] font-bold m-0 uppercase tracking-wider" style={{ color: accentColor }}>{title}</h3>
+          <p className="text-[10px] font-semibold mt-[3px]" style={{ color: `${accentColor}99` }}>{subtitle}</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {hasData && (
+            <div className="flex gap-3 text-[9px] font-bold tracking-wider" style={{ color: accentColor }}>
+              <span>PEAK <span style={{ color: accentColor }}>{fftData.peakFreq} Hz</span></span>
+              <span>MAG <span style={{ color: accentColor }}>{fftData.peakMag.toFixed(0)}</span></span>
+            </div>
+          )}
+          <div className="flex items-center gap-[5px] text-[10px] font-bold tracking-[0.1em]" style={{ color: accentColor }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+            FFT
+          </div>
+        </div>
+      </div>
+      <div className="flex-1 relative w-full min-h-0">
+        {waiting || !hasData ? (
+          <div className="absolute inset-0 flex justify-center items-center">
+            <span className="text-[12px] font-semibold" style={{ color: `${accentColor}60` }}>Waiting for data...</span>
+          </div>
+        ) : (
+          <Line
+            data={{
+              labels: fftData.freqs,
+              datasets: [{
+                data: fftData.magnitudes.map((mag, i) => ({ x: fftData.freqs[i], y: mag })),
+                borderColor: accentColor,
+                backgroundColor: `${accentColor}20`,
+                borderWidth: 1.5,
+                tension: 0.3,
+                pointRadius: 0,
+                fill: true,
+              }]
+            }}
+            options={chartOptions}
+          />
+        )}
+      </div>
+    </div>
   );
 };
 
 export default function Dashboard() {
   const [setupDone, setSetupDone] = useState(false);
-  const [ports, setPorts] = useState<{port: string, description: string}[]>([]);
+  const [ports, setPorts] = useState<{ port: string, description: string }[]>([]);
   const [selectedPort, setSelectedPort] = useState('');
   const [selectedBaud, setSelectedBaud] = useState(115200);
   const [portsLoading, setPortsLoading] = useState(false);
@@ -197,12 +404,34 @@ export default function Dashboard() {
   const [useRaw, setUseRaw] = useState(false);
   const [autoScale, setAutoScale] = useState(false);
 
-  // ─── Pearson Correlation (Historical Reference ↔ STM32 PCG) ───
-  const pearsonR = useMemo(
-    () => pearsonCorrelation(historicalBuffer, pcgBuffer),
-    [historicalBuffer, pcgBuffer]
+  // ─── FFT Computation (Sliding Window 3s) ───
+  const historicalFFT = useMemo(
+    () => computeFFTMagnitude(historicalBuffer, SAMPLE_RATE_HISTORICAL, 100),
+    [historicalBuffer]
   );
+  const ecgFFT = useMemo(
+    () => computeFFTMagnitude(useRaw ? stm32RawBuffer : stm32Buffer, SAMPLE_RATE_STM32, 50),
+    [useRaw, stm32RawBuffer, stm32Buffer]
+  );
+  const pcgFFT = useMemo(
+    () => computeFFTMagnitude(useRaw ? pcgRawBuffer : pcgBuffer, SAMPLE_RATE_STM32, 200),
+    [useRaw, pcgRawBuffer, pcgBuffer]
+  );
+
+  // ─── Pearson Correlation (FFT Historical ↔ FFT PCG) ───
+  const pearsonR = useMemo(() => {
+    const hMag = historicalFFT.magnitudes;
+    const pMag = pcgFFT.magnitudes;
+    if (hMag.length === 0 || pMag.length === 0) return NaN;
+    const len = Math.min(hMag.length, pMag.length);
+    return pearsonCorrelation(hMag.slice(0, len), pMag.slice(0, len));
+  }, [historicalFFT, pcgFFT]);
   const risk = useMemo(() => riskFromCorrelation(pearsonR), [pearsonR]);
+
+  // FFT chart options (memoized)
+  const historicalFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 100), []);
+  const ecgFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 50), []);
+  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 200), []);
 
   // 1. Fetch Ports
   const fetchPorts = async () => {
@@ -354,8 +583,8 @@ export default function Dashboard() {
               <label className="block text-[10px] font-bold text-[#831843] uppercase tracking-widest mb-3">Serial Port</label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
-                  <select 
-                    value={selectedPort} 
+                  <select
+                    value={selectedPort}
                     onChange={e => setSelectedPort(e.target.value)}
                     className="w-full appearance-none pl-4 pr-10 py-3 border border-[#fbcfe8] rounded-xl text-sm text-[#831843] bg-[#fff0f5] focus:ring-2 focus:ring-[#f472b6] outline-none transition-all"
                   >
@@ -374,12 +603,12 @@ export default function Dashboard() {
               <label className="block text-[10px] font-bold text-[#831843] uppercase tracking-widest mb-3">Baud Rate</label>
               <div className="grid grid-cols-4 gap-2">
                 {COMMON_BAUDS.map(b => (
-                  <button 
-                    key={b} 
+                  <button
+                    key={b}
                     onClick={() => setSelectedBaud(b)}
                     className={`py-2 rounded-lg text-[10px] font-bold border transition-all ${selectedBaud === b ? 'bg-[#db2777] border-[#db2777] text-white' : 'bg-white border-[#fbcfe8] text-[#ec4899] hover:bg-[#fff0f5]'}`}
                   >
-                    {b >= 1000 ? `${b/1000}K` : b}
+                    {b >= 1000 ? `${b / 1000}K` : b}
                   </button>
                 ))}
               </div>
@@ -391,8 +620,8 @@ export default function Dashboard() {
               </div>
             )}
 
-            <button 
-              onClick={connectDevice} 
+            <button
+              onClick={connectDevice}
               disabled={connecting || !selectedPort}
               className="w-full py-4 rounded-2xl text-sm font-bold text-white bg-gradient-to-r from-[#db2777] to-[#ec4899] hover:opacity-90 disabled:opacity-30 transition-all flex justify-center items-center gap-2"
             >
@@ -418,13 +647,13 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex gap-2">
-          <button 
+          <button
             onClick={() => setUseRaw(!useRaw)}
             className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${useRaw ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-[#db2777] bg-[#fff0f5] border-[#fbcfe8]'}`}
           >
             {useRaw ? 'RAW' : 'FILTERED'}
           </button>
-          <button 
+          <button
             onClick={() => setAutoScale(!autoScale)}
             className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-full border transition-all ${autoScale ? 'text-blue-600 bg-blue-50 border-blue-200' : 'text-[#db2777] bg-[#fff0f5] border-[#fbcfe8]'}`}
             title="Toggle Y-axis auto-scaling"
@@ -438,59 +667,105 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <div className="flex gap-4 items-stretch h-[280px]">
-        <ChartCard 
-          title="Historical Reference" 
-          subtitle="Baseline Signal Pattern" 
-          data={historicalBuffer} 
+      {/* ─── Row 1: Historical Reference ─── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ChartCard
+          title="Historical Reference"
+          subtitle="Baseline Signal Pattern · Time Domain"
+          data={historicalBuffer}
           options={HISTORICAL_OPTIONS}
-          className="flex-[3]" 
+          className="h-[300px]"
         />
-        <div className="flex-[1] bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl p-6 flex flex-col justify-between">
-          <div>
-            <p className="text-[12px] font-bold text-[#ec4899] uppercase tracking-wider">Stroke Risk</p>
-            <div className="flex items-baseline gap-1 mt-3">
-              <span className="text-[60px] font-black text-[#831843]">{risk.pct}</span>
-              <span className="text-[26px] font-extrabold text-[#831843]">%</span>
-            </div>
-            <p className="text-[10px] font-semibold text-[#be185d] mt-1">
-              Pearson r = {isNaN(pearsonR) ? '—' : pearsonR.toFixed(4)}
-            </p>
+        <FFTChartCard
+          title="Historical FFT"
+          subtitle="Frequency Spectrum · Window 3s · 0–100 Hz"
+          fftData={historicalFFT}
+          accentColor="#db2777"
+          bgColor="#fff0f5"
+          borderColor="#fbcfe8"
+          chartOptions={historicalFFTOptions}
+          className="h-[300px]"
+        />
+      </div>
+
+      {/* ─── Row 2: STM32 ECG ─── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ChartCard
+          title="STM32 Real-time ECG"
+          subtitle={useRaw ? "Raw ADC · Time Domain" : "Electrocardiogram · Time Domain"}
+          live
+          data={useRaw ? stm32RawBuffer : stm32Buffer}
+          options={autoScale ? AUTO_OPTIONS : (useRaw ? ECG_RAW_OPTIONS : ECG_OPTIONS)}
+          showStats
+          waiting={!connectedSTM32}
+          className="h-[300px]"
+        />
+        <FFTChartCard
+          title="ECG FFT"
+          subtitle={`Frequency Spectrum · Window 3s · 0–50 Hz${useRaw ? ' · Raw' : ''}`}
+          fftData={ecgFFT}
+          accentColor="#db2777"
+          bgColor="#fff0f5"
+          borderColor="#fbcfe8"
+          chartOptions={ecgFFTOptions}
+          waiting={!connectedSTM32}
+          className="h-[300px]"
+        />
+      </div>
+
+      {/* ─── Row 3: STM32 PCG ─── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ChartCard
+          title="STM32 Real-time PCG"
+          subtitle={useRaw ? "Raw ADC · Time Domain" : "Phonocardiogram · Time Domain"}
+          live
+          data={useRaw ? pcgRawBuffer : pcgBuffer}
+          options={autoScale ? AUTO_OPTIONS : (useRaw ? PCG_RAW_OPTIONS : PCG_OPTIONS)}
+          showStats
+          waiting={!connectedSTM32}
+          className="h-[300px]"
+        />
+        <FFTChartCard
+          title="PCG FFT"
+          subtitle={`Frequency Spectrum · Window 3s · 0–200 Hz${useRaw ? ' · Raw' : ''}`}
+          fftData={pcgFFT}
+          accentColor="#db2777"
+          bgColor="#fff0f5"
+          borderColor="#fbcfe8"
+          chartOptions={pcgFFTOptions}
+          waiting={!connectedSTM32}
+          className="h-[300px]"
+        />
+      </div>
+
+      {/* ─── Row 4: Risk Correlation ─── */}
+      <div className="bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl p-6 flex flex-col justify-between h-[280px]">
+        <div>
+          <p className="text-[12px] font-bold text-[#ec4899] uppercase tracking-wider">Stroke Risk Correlation</p>
+          <p className="text-[10px] font-semibold text-[#be185d] mt-1">FFT Spectrum Correlation · Historical ↔ PCG</p>
+          <div className="flex items-baseline gap-1 mt-4">
+            <span className="text-[60px] font-black text-[#831843] leading-none">{risk.pct}</span>
+            <span className="text-[26px] font-extrabold text-[#831843] leading-none">%</span>
+            <span className="ml-3 text-[18px] font-bold text-[#831843]">{risk.label}</span>
           </div>
-          <div className="space-y-2">
-            <div className="h-[10px] w-full rounded-full bg-[#fce7f3] overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{ width: `${risk.pct}%`, backgroundColor: risk.color }}
-              />
-            </div>
-            <p className="text-[10px] font-bold text-right uppercase" style={{ color: risk.color }}>
-              {risk.label}
-            </p>
+          <p className="text-[10px] font-semibold text-[#be185d] mt-1">
+            Pearson r = {isNaN(pearsonR) ? '—' : pearsonR.toFixed(4)}
+          </p>
+        </div>
+        <div className="space-y-2">
+          <div className="h-[10px] w-full rounded-full bg-[#fce7f3] overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{ width: `${risk.pct}%`, backgroundColor: risk.color }}
+            />
+          </div>
+          <div className="flex justify-between text-[10px] font-bold text-[#ec4899]">
+            <span>0%</span>
+            <span>50%</span>
+            <span>100%</span>
           </div>
         </div>
       </div>
-
-      <ChartCard 
-        title="STM32 Real-time ECG" 
-        subtitle={useRaw ? "Raw ADC (unfiltered)" : "Electrocardiogram Analysis (Kalman filtered)"} 
-        live 
-        data={useRaw ? stm32RawBuffer : stm32Buffer} 
-        options={autoScale ? AUTO_OPTIONS : (useRaw ? ECG_RAW_OPTIONS : ECG_OPTIONS)}
-        showStats
-        className="h-[280px]" 
-      />
-
-      <ChartCard 
-        title="STM32 Real-time PCG" 
-        subtitle={useRaw ? "Raw ADC (unfiltered)" : "Phonocardiogram Analysis (Kalman filtered)"} 
-        live 
-        data={useRaw ? pcgRawBuffer : pcgBuffer} 
-        options={autoScale ? AUTO_OPTIONS : (useRaw ? PCG_RAW_OPTIONS : PCG_OPTIONS)}
-        showStats
-        waiting={!connectedSTM32} 
-        className="h-[280px]" 
-      />
     </main>
   );
 }

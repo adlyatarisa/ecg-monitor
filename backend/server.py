@@ -4,7 +4,7 @@ import struct
 import json
 import os
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), '../data/ecg_0_200hz.dat')
+DATA_PATH = os.path.join(os.path.dirname(__file__), '../data/ecg_0_1000hz.dat')
 SAMPLE_RATE = 1000  # Hz
 
 async def stream_data(websocket):

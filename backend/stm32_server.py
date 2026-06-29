@@ -10,7 +10,7 @@ from aiohttp import web
 #  Server Config 
 SERVER_HOST = 'localhost'
 SERVER_PORT = 8087
-SAMPLE_RATE = 500          
+SAMPLE_RATE = 1000         
 
 COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800]
 

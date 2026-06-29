@@ -100,7 +100,7 @@
     MX_TIM2_Init();
     MX_USART1_UART_Init();
     /* USER CODE BEGIN 2 */
-      HAL_UART_Transmit(&huart1, (uint8_t*)"Sistem ECG & PCG 500Hz\r\n", 24, 100);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"Sistem ECG & PCG 1000Hz\r\n", 25, 100);
       HAL_TIM_Base_Start_IT(&htim2);
       /* USER CODE END 2 */
 
@@ -236,7 +236,7 @@
     htim2.Instance = TIM2;
     htim2.Init.Prescaler = 6399;
     htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim2.Init.Period = 19;
+    htim2.Init.Period = 9;   // 64MHz / 6400 / 10 = 1000 Hz
     htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
     htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
     if (HAL_TIM_Base_Init(&htim2) != HAL_OK)

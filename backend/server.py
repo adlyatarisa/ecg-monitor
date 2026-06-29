@@ -5,6 +5,7 @@ import json
 import os
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), '../data/ecg_0_200hz.dat')
+SAMPLE_RATE = 1000  # Hz
 
 async def stream_data(websocket):
     print("Client connected!")
@@ -19,8 +20,8 @@ async def stream_data(websocket):
 
     ecg_0 = struct.unpack(f'<{num_samples}h', data)
     
-    chunk_size = 10 
-    delay = 0.05   
+    chunk_size = 10
+    delay = chunk_size / SAMPLE_RATE  # 0.01s @ 1000 Hz
 
     try:
         while True:

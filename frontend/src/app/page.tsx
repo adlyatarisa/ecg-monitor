@@ -38,7 +38,7 @@ const COMMON_BAUDS = [9600, 38400, 115200, 230400];
 
 // ─── Sample Rates ───
 const SAMPLE_RATE_STM32 = 500;       // STM32 ECG/PCG at 500 Hz
-const SAMPLE_RATE_HISTORICAL = 200;  // Historical data downsampled to 200 Hz
+const SAMPLE_RATE_HISTORICAL = 1000; // Historical data from ecg_0_1000hz.dat @ 1000 Hz
 const SAMPLE_RATE_HEALTHY = 1000;    // WFDB 103003_ECG, native 1000 Hz
 
 const buildChartOptions = (yMin: number | undefined, yMax: number | undefined): ChartOptions<'line'> => ({

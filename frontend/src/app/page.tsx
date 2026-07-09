@@ -62,7 +62,7 @@ const buildChartOptions = (yMin: number | undefined, yMax: number | undefined): 
   plugins: { legend: { display: false }, tooltip: { enabled: false } }
 });
 
-const ECG_OPTIONS = buildChartOptions(-400, 400);   // filtered ECG, DC removed
+const ECG_OPTIONS = buildChartOptions(-2500, 2500); // filtered ECG — wide range to match STM32 signal
 const PCG_OPTIONS = buildChartOptions(-600, 600);   // filtered PCG (20–150 Hz)
 const ECG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
 const PCG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
@@ -331,7 +331,20 @@ const buildFFTChartOptions = (accentColor: string, maxFreq: number): ChartOption
       min: 0,
       max: maxFreq,
       grid: { color: `${accentColor}15`, lineWidth: 0.4 },
-      ticks: { color: accentColor, font: { size: 9, weight: 600 }, maxTicksLimit: 10, callback: (v: any) => `${v}` },
+      ticks: {
+        color: accentColor,
+        font: { size: 9, weight: 600 },
+        maxTicksLimit: 3,
+        callback: (v: any) => `${v}`,
+      },
+      // Force exactly 3 ticks: 0, midpoint, max — regardless of zoom or data range
+      afterBuildTicks: (axis: any) => {
+        axis.ticks = [
+          { value: 0 },
+          { value: Math.round(maxFreq / 2) },
+          { value: maxFreq },
+        ];
+      },
       title: { display: true, text: 'Frequency (Hz)', color: accentColor, font: { size: 9, weight: 'bold' as const } }
     },
     y: {

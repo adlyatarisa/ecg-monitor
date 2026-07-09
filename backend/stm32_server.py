@@ -1,11 +1,19 @@
 import asyncio
+import sys
 import json
 import re
 import serial
 import serial.tools.list_ports
 import numpy as np
-from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
+from scipy.signal import iirnotch, sosfilt, sosfilt_zi, tf2sos
 from aiohttp import web
+
+# ProactorEventLoop (asyncio's Windows default) fires pending asyncio.sleep()
+# timers almost instantly when interleaved with repeated websocket sends,
+# causing chunk pacing to run much faster than real time. SelectorEventLoop
+# doesn't have this issue.
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 #  Server Config 
 SERVER_HOST = 'localhost'
@@ -15,11 +23,9 @@ SAMPLE_RATE = 1000
 COMMON_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800]
 
 # DSP Filters
-# ECG: bandpass 0.5–40 Hz + notch 50 Hz
-_ECG_BANDPASS_SOS = butter(4, [0.5, 40.0], btype='band', fs=SAMPLE_RATE, output='sos')
-_PCG_BANDPASS_SOS = butter(4, [20.0, 150.0], btype='band', fs=SAMPLE_RATE, output='sos')
-_b, _a            = iirnotch(w0=50.0, Q=30.0, fs=SAMPLE_RATE)
-_NOTCH_SOS        = tf2sos(_b, _a)
+# Band-pass disabled — only notch 50 Hz + Kalman smoothing applied
+_b, _a     = iirnotch(w0=50.0, Q=30.0, fs=SAMPLE_RATE)
+_NOTCH_SOS = tf2sos(_b, _a)
 
 #  Kalman Filter (1D, scalar)
 class KalmanFilter1D:
@@ -74,9 +80,7 @@ connected_ws: set          = set()
 _serial_task               = None
 _broadcast_task            = None
 _data_queue: asyncio.Queue | None = None
-_bp_zi_ecg: np.ndarray | None  = None
 _notch_zi_ecg: np.ndarray | None = None
-_bp_zi_pcg: np.ndarray | None  = None
 _notch_zi_pcg: np.ndarray | None = None
 # Kalman filter instances
 _kalman_ecg: KalmanFilter1D | None = None
@@ -88,24 +92,20 @@ SERIAL_CONNECTED: bool     = False
 
 # DSP 
 def apply_dsp(samples: list, is_pcg: bool = False) -> list:
-    global _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
+    global _notch_zi_ecg, _notch_zi_pcg
     global _kalman_ecg, _kalman_pcg
     arr = np.array(samples, dtype=np.float64)
     if not is_pcg:
-        if _bp_zi_ecg is None:
-            _bp_zi_ecg    = sosfilt_zi(_ECG_BANDPASS_SOS) * arr[0]
-            _notch_zi_ecg = sosfilt_zi(_NOTCH_SOS)        * arr[0]
+        if _notch_zi_ecg is None:
+            _notch_zi_ecg = sosfilt_zi(_NOTCH_SOS) * arr[0]
             _kalman_ecg   = KalmanFilter1D(Q=0.05, R=1.0)
-        out, _bp_zi_ecg    = sosfilt(_ECG_BANDPASS_SOS, arr,  zi=_bp_zi_ecg)
-        out, _notch_zi_ecg = sosfilt(_NOTCH_SOS,        out,  zi=_notch_zi_ecg)
+        out, _notch_zi_ecg = sosfilt(_NOTCH_SOS, arr, zi=_notch_zi_ecg)
         out = _kalman_ecg.filter_array(out)
     else:
-        if _bp_zi_pcg is None:
-            _bp_zi_pcg    = sosfilt_zi(_PCG_BANDPASS_SOS) * arr[0]
-            _notch_zi_pcg = sosfilt_zi(_NOTCH_SOS)        * arr[0]
+        if _notch_zi_pcg is None:
+            _notch_zi_pcg = sosfilt_zi(_NOTCH_SOS) * arr[0]
             _kalman_pcg   = KalmanFilter1D(Q=0.1, R=0.8)
-        out, _bp_zi_pcg    = sosfilt(_PCG_BANDPASS_SOS, arr,  zi=_bp_zi_pcg)
-        out, _notch_zi_pcg = sosfilt(_NOTCH_SOS,        out,  zi=_notch_zi_pcg)
+        out, _notch_zi_pcg = sosfilt(_NOTCH_SOS, arr, zi=_notch_zi_pcg)
         out = _kalman_pcg.filter_array(out)
     return [round(float(v), 2) for v in out]
 
@@ -279,7 +279,7 @@ async def route_ports(request):
 
 async def route_connect(request):
     """POST /connect — start serial with selected port & baud."""
-    global _serial_task, _broadcast_task, _bp_zi_ecg, _notch_zi_ecg, _bp_zi_pcg, _notch_zi_pcg
+    global _serial_task, _broadcast_task, _notch_zi_ecg, _notch_zi_pcg
     global _kalman_ecg, _kalman_pcg
     global CURRENT_PORT, CURRENT_BAUD, _data_queue
 
@@ -294,9 +294,9 @@ async def route_connect(request):
         if t and not t.done():
             t.cancel()
             print(f"[CONNECT] Cancelled task: {t}")
-            await asyncio.sleep(0.1)  
+            await asyncio.sleep(0.1)
 
-    _bp_zi_ecg = _notch_zi_ecg = _bp_zi_pcg = _notch_zi_pcg = None
+    _notch_zi_ecg = _notch_zi_pcg = None
     _kalman_ecg = _kalman_pcg = None
     CURRENT_PORT = port
     CURRENT_BAUD = baud
@@ -345,7 +345,7 @@ def create_app():
 
 
 if __name__ == '__main__':
-    print(f"[DSP]  Band-pass ECG[0.5–40 Hz] PCG[20–150 Hz] + Notch [50 Hz] + Kalman @ {SAMPLE_RATE} Hz")
+    print(f"[DSP]  Band-pass DISABLED — Notch [50 Hz] + Kalman only @ {SAMPLE_RATE} Hz")
     print(f"[HTTP] GET  http://{SERVER_HOST}:{SERVER_PORT}/ports")
     print(f"[HTTP] POST http://{SERVER_HOST}:{SERVER_PORT}/connect")
     print(f"[HTTP] GET  http://{SERVER_HOST}:{SERVER_PORT}/status")

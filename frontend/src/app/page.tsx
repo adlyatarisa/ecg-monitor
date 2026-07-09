@@ -28,8 +28,8 @@ ChartJS.register(
   Filler
 );
 
-// ─── Constants & Utils 
-const MAX_POINTS = 1500;
+// ─── Constants & Utils
+const MAX_POINTS = 4000; // 4s window @ 1000 Hz — realistic ECG monitor sweep length
 const labels = Array.from({ length: MAX_POINTS }, (_, i) => i);
 const BACKEND = 'http://localhost:8087';
 const WS_URL_STM32 = 'ws://localhost:8087/ws';
@@ -37,8 +37,9 @@ const WS_URL_HISTORICAL = 'ws://localhost:8080';
 const COMMON_BAUDS = [9600, 38400, 115200, 230400];
 
 // ─── Sample Rates ───
-const SAMPLE_RATE_STM32 = 500;       // STM32 ECG/PCG at 500 Hz
-const SAMPLE_RATE_HISTORICAL = 200;  // Historical data downsampled to 200 Hz
+const SAMPLE_RATE_STM32 = 1000; // matches STM32 hardware (TIM2 @ 1000 Hz, see main.c)
+const SAMPLE_RATE_HISTORICAL = 1000;
+const SAMPLE_RATE_HEALTHY = 1000; // WFDB 103003_ECG, native 1000 Hz
 
 const buildChartOptions = (yMin: number | undefined, yMax: number | undefined): ChartOptions<'line'> => ({
   animation: false,
@@ -67,6 +68,7 @@ const ECG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
 const PCG_RAW_OPTIONS = buildChartOptions(0, 4095); // raw ADC 12-bit
 const AUTO_OPTIONS = buildChartOptions(undefined, undefined); // auto-scale
 const HISTORICAL_OPTIONS = buildChartOptions(-2500, 2500);
+const HEALTHY_OPTIONS = buildChartOptions(undefined, undefined); // physical uV, auto-scaled (24h range unknown ahead of time)
 
 // Compute simple stats for a buffer (ignoring nulls)
 function computeStats(buf: (number | null)[]) {
@@ -218,7 +220,10 @@ function computeFFTMagnitude(
 
   const halfN = nfft >> 1;
   const freqResolution = sampleRate / nfft;
-  const cutoffBin = maxFreq ? Math.min(Math.floor(maxFreq / freqResolution), halfN) : halfN;
+  // Cap at nfft-1 (not halfN) so maxFreq beyond Nyquist naturally reveals the
+  // conjugate-symmetric mirror of a real-valued signal's spectrum, instead of
+  // being clipped at the Nyquist bin.
+  const cutoffBin = maxFreq ? Math.min(Math.floor(maxFreq / freqResolution), nfft - 1) : halfN;
 
   const freqs: number[] = [];
   const magnitudes: number[] = [];
@@ -238,6 +243,79 @@ function computeFFTMagnitude(
     peakFreq: Math.round(peakFreq * 10) / 10,
     peakMag: Math.round(peakMag * 100) / 100
   };
+}
+
+// ─── Stroke vs Healthy Deviation Frequencies ───
+interface DeviationFreq {
+  freq: number;
+  strokeMag: number;
+  healthyMag: number;
+  delta: number;
+}
+
+// Finds the top-N frequency bins where the stroke-reference and healthy-reference
+// spectra diverge the most. These become the "watch list" frequencies used to
+// screen the live ECG/PCG signals for a stroke-like pattern.
+function computeDeviationFrequencies(strokeFFT: FFTResult, healthyFFT: FFTResult, topN: number): DeviationFreq[] {
+  const len = Math.min(strokeFFT.freqs.length, healthyFFT.freqs.length);
+  if (len === 0) return [];
+
+  const diffs: DeviationFreq[] = [];
+  for (let i = 0; i < len; i++) {
+    const strokeMag = strokeFFT.magnitudes[i];
+    const healthyMag = healthyFFT.magnitudes[i];
+    diffs.push({ freq: strokeFFT.freqs[i], strokeMag, healthyMag, delta: Math.abs(strokeMag - healthyMag) });
+  }
+  diffs.sort((a, b) => b.delta - a.delta);
+  return diffs.slice(0, topN);
+}
+
+// Nearest-bin magnitude lookup; returns null if the target frequency is beyond
+// what this FFT result covers (e.g. PCG FFT is capped at 500 Hz).
+function findMagnitudeAtFreq(fft: FFTResult, targetFreq: number): number | null {
+  if (fft.freqs.length === 0) return null;
+  if (targetFreq > fft.freqs[fft.freqs.length - 1]) return null;
+  let closestIdx = 0, closestDiff = Infinity;
+  for (let i = 0; i < fft.freqs.length; i++) {
+    const d = Math.abs(fft.freqs[i] - targetFreq);
+    if (d < closestDiff) { closestDiff = d; closestIdx = i; }
+  }
+  return fft.magnitudes[closestIdx];
+}
+
+interface DeviationCheck extends DeviationFreq {
+  ecgMag: number | null;
+  pcgMag: number | null;
+  ecgHit: boolean;
+  pcgHit: boolean;
+}
+
+interface StrokeDetectionResult {
+  checks: DeviationCheck[];
+  hitCount: number;
+  abnormal: boolean;
+}
+
+// At each watch-list frequency, flags a "hit" when the live signal (ECG or PCG)
+// sits closer to the stroke-reference magnitude than to the healthy-reference
+// magnitude — i.e. the live spectrum looks more like the stroke pattern than the
+// healthy one at that specific frequency. Any hit triggers an abnormal flag.
+function detectStrokeIndication(
+  deviationFreqs: DeviationFreq[],
+  ecgFFT: FFTResult,
+  pcgFFT: FFTResult
+): StrokeDetectionResult {
+  const checks: DeviationCheck[] = deviationFreqs.map(dev => {
+    const ecgMag = findMagnitudeAtFreq(ecgFFT, dev.freq);
+    const pcgMag = findMagnitudeAtFreq(pcgFFT, dev.freq);
+    const closerToStroke = (liveMag: number | null) =>
+      liveMag !== null && Math.abs(liveMag - dev.strokeMag) < Math.abs(liveMag - dev.healthyMag);
+    const ecgHit = closerToStroke(ecgMag);
+    const pcgHit = closerToStroke(pcgMag);
+    return { ...dev, ecgMag, pcgMag, ecgHit, pcgHit };
+  });
+  const hitCount = checks.filter(c => c.ecgHit || c.pcgHit).length;
+  return { checks, hitCount, abnormal: hitCount > 0 };
 }
 
 // ─── FFT Chart Options Builder ───
@@ -384,8 +462,9 @@ const FFTChartCard = ({ title, subtitle, fftData, accentColor, bgColor, borderCo
   );
 };
 
+
 export default function Dashboard() {
-  const [setupDone, setSetupDone] = useState(false);
+  const [setupDone, setSetupDone] = useState(true);
   const [ports, setPorts] = useState<{ port: string, description: string }[]>([]);
   const [selectedPort, setSelectedPort] = useState('');
   const [selectedBaud, setSelectedBaud] = useState(115200);
@@ -397,6 +476,7 @@ export default function Dashboard() {
   const [, setConnectedHistorical] = useState(false);
   const [connectedSTM32, setConnectedSTM32] = useState(false);
   const [historicalBuffer, setHistoricalBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
+  const [healthyBuffer, setHealthyBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [stm32Buffer, setStm32Buffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [pcgBuffer, setPcgBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
   const [stm32RawBuffer, setStm32RawBuffer] = useState<(number | null)[]>(Array(MAX_POINTS).fill(null));
@@ -406,16 +486,20 @@ export default function Dashboard() {
 
   // ─── FFT Computation (Sliding Window 3s) ───
   const historicalFFT = useMemo(
-    () => computeFFTMagnitude(historicalBuffer, SAMPLE_RATE_HISTORICAL, 100),
+    () => computeFFTMagnitude(historicalBuffer, SAMPLE_RATE_HISTORICAL, 1000),
     [historicalBuffer]
   );
   const ecgFFT = useMemo(
-    () => computeFFTMagnitude(useRaw ? stm32RawBuffer : stm32Buffer, SAMPLE_RATE_STM32, 50),
+    () => computeFFTMagnitude(useRaw ? stm32RawBuffer : stm32Buffer, SAMPLE_RATE_STM32, 1000),
     [useRaw, stm32RawBuffer, stm32Buffer]
   );
   const pcgFFT = useMemo(
-    () => computeFFTMagnitude(useRaw ? pcgRawBuffer : pcgBuffer, SAMPLE_RATE_STM32, 200),
+    () => computeFFTMagnitude(useRaw ? pcgRawBuffer : pcgBuffer, SAMPLE_RATE_STM32, 500),
     [useRaw, pcgRawBuffer, pcgBuffer]
+  );
+  const healthyFFT = useMemo(
+    () => computeFFTMagnitude(healthyBuffer, SAMPLE_RATE_HEALTHY, 1000),
+    [healthyBuffer]
   );
 
   // ─── Pearson Correlation (FFT Historical ↔ FFT PCG) ───
@@ -428,10 +512,30 @@ export default function Dashboard() {
   }, [historicalFFT, pcgFFT]);
   const risk = useMemo(() => riskFromCorrelation(pearsonR), [pearsonR]);
 
+  // ─── Pearson Correlation (FFT Stroke-Ref ↔ FFT Healthy-Ref) ───
+  const strokeHealthyR = useMemo(() => {
+    const sMag = historicalFFT.magnitudes;
+    const hMag = healthyFFT.magnitudes;
+    if (sMag.length === 0 || hMag.length === 0) return NaN;
+    const len = Math.min(sMag.length, hMag.length);
+    return pearsonCorrelation(sMag.slice(0, len), hMag.slice(0, len));
+  }, [historicalFFT, healthyFFT]);
+
+  // ─── Deviation frequencies (stroke-ref vs healthy-ref) + live detection ───
+  const deviationFreqs = useMemo(
+    () => computeDeviationFrequencies(historicalFFT, healthyFFT, 5),
+    [historicalFFT, healthyFFT]
+  );
+  const strokeDetection = useMemo(
+    () => detectStrokeIndication(deviationFreqs, ecgFFT, pcgFFT),
+    [deviationFreqs, ecgFFT, pcgFFT]
+  );
+
   // FFT chart options (memoized)
-  const historicalFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 100), []);
-  const ecgFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 50), []);
-  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 200), []);
+  const historicalFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 1000), []);
+  const ecgFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 1000), []);
+  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 500), []);
+  const healthyFFTOptions = useMemo(() => buildFFTChartOptions('#db2777', 1000), []);
 
   // 1. Fetch Ports
   const fetchPorts = async () => {
@@ -479,6 +583,8 @@ export default function Dashboard() {
     const wsH = new WebSocket(WS_URL_HISTORICAL);
     let hBuf = Array(MAX_POINTS).fill(null);
     let hIdx = 0;
+    let healthyBuf = Array(MAX_POINTS).fill(null);
+    let healthyIdx = 0;
     wsH.onopen = () => setConnectedHistorical(true);
     wsH.onmessage = (e) => {
       const payload = JSON.parse(e.data);
@@ -488,6 +594,13 @@ export default function Dashboard() {
           hIdx = (hIdx + 1) % MAX_POINTS;
         });
         setHistoricalBuffer([...hBuf]);
+      }
+      if (payload.healthy_ecg) {
+        payload.healthy_ecg.forEach((val: number) => {
+          healthyBuf[healthyIdx] = val;
+          healthyIdx = (healthyIdx + 1) % MAX_POINTS;
+        });
+        setHealthyBuffer([...healthyBuf]);
       }
     };
 
@@ -678,12 +791,34 @@ export default function Dashboard() {
         />
         <FFTChartCard
           title="Historical FFT"
-          subtitle="Frequency Spectrum · Window 3s · 0–100 Hz"
+          subtitle="Frequency Spectrum · Window 3s · 0–1000 Hz"
           fftData={historicalFFT}
           accentColor="#db2777"
           bgColor="#fff0f5"
           borderColor="#fbcfe8"
           chartOptions={historicalFFTOptions}
+          className="h-[300px]"
+        />
+      </div>
+
+      {/* ─── Row 1b: Healthy 24h Reference ─── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ChartCard
+          title="Healthy Subject Reference (24h)"
+          subtitle="WFDB 103003_ECG · 1000 Hz · Physical Units (uV)"
+          live
+          data={healthyBuffer}
+          options={HEALTHY_OPTIONS}
+          className="h-[300px]"
+        />
+        <FFTChartCard
+          title="Healthy FFT"
+          subtitle="Frequency Spectrum · Window 3s · 0–1000 Hz"
+          fftData={healthyFFT}
+          accentColor="#db2777"
+          bgColor="#fff0f5"
+          borderColor="#fbcfe8"
+          chartOptions={healthyFFTOptions}
           className="h-[300px]"
         />
       </div>
@@ -702,7 +837,7 @@ export default function Dashboard() {
         />
         <FFTChartCard
           title="ECG FFT"
-          subtitle={`Frequency Spectrum · Window 3s · 0–50 Hz${useRaw ? ' · Raw' : ''}`}
+          subtitle={`Frequency Spectrum · Window 3s · 0–1000 Hz${useRaw ? ' · Raw' : ''}`}
           fftData={ecgFFT}
           accentColor="#db2777"
           bgColor="#fff0f5"
@@ -727,7 +862,7 @@ export default function Dashboard() {
         />
         <FFTChartCard
           title="PCG FFT"
-          subtitle={`Frequency Spectrum · Window 3s · 0–200 Hz${useRaw ? ' · Raw' : ''}`}
+          subtitle={`Frequency Spectrum · Window 3s · 0–500 Hz${useRaw ? ' · Raw' : ''}`}
           fftData={pcgFFT}
           accentColor="#db2777"
           bgColor="#fff0f5"
@@ -764,6 +899,72 @@ export default function Dashboard() {
             <span>50%</span>
             <span>100%</span>
           </div>
+        </div>
+      </div>
+
+      {/* ─── Row 5: Frequency-Based Stroke Detection ─── */}
+      <div className="bg-[#fff0f5] border border-[#fbcfe8] rounded-2xl p-6">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-4">
+          <div>
+            <p className="text-[12px] font-bold text-[#ec4899] uppercase tracking-wider">Frequency-Based Stroke Detection</p>
+            <p className="text-[10px] font-semibold text-[#be185d] mt-1">
+              Stroke-Ref ↔ Healthy-Ref Similarity · Pearson r = {isNaN(strokeHealthyR) ? '—' : strokeHealthyR.toFixed(4)}
+            </p>
+            <p className="text-[10px] font-semibold text-[#be185d] mt-1">
+              Watch-list: top {deviationFreqs.length} frequencies where stroke-ref and healthy-ref spectra diverge most
+            </p>
+          </div>
+          <div
+            className="flex items-center gap-2 px-4 py-2 rounded-xl border shrink-0"
+            style={{
+              color: strokeDetection.abnormal ? '#dc2626' : '#16a34a',
+              backgroundColor: strokeDetection.abnormal ? '#fef2f2' : '#f0fdf4',
+              borderColor: strokeDetection.abnormal ? '#fecaca' : '#bbf7d0',
+            }}
+          >
+            <AlertCircle size={18} />
+            <span className="text-[14px] font-black uppercase tracking-wider">
+              {strokeDetection.abnormal ? 'Indikasi Stroke (Abnormal)' : 'Normal'}
+            </span>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="text-left text-[#be185d] uppercase tracking-wider">
+                <th className="py-1.5 pr-4 font-bold">Freq (Hz)</th>
+                <th className="py-1.5 pr-4 font-bold">Stroke-Ref Mag</th>
+                <th className="py-1.5 pr-4 font-bold">Healthy-Ref Mag</th>
+                <th className="py-1.5 pr-4 font-bold">Δ</th>
+                <th className="py-1.5 pr-4 font-bold">ECG Live</th>
+                <th className="py-1.5 pr-4 font-bold">PCG Live</th>
+                <th className="py-1.5 font-bold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {strokeDetection.checks.length === 0 ? (
+                <tr><td colSpan={7} className="py-3 text-[#f9a8d4] font-semibold">Waiting for reference data...</td></tr>
+              ) : strokeDetection.checks.map((c, idx) => {
+                const hit = c.ecgHit || c.pcgHit;
+                return (
+                  <tr key={idx} className="border-t border-[#fbcfe8] text-[#831843]">
+                    <td className="py-1.5 pr-4 font-bold">{c.freq.toFixed(1)}</td>
+                    <td className="py-1.5 pr-4">{c.strokeMag.toFixed(2)}</td>
+                    <td className="py-1.5 pr-4">{c.healthyMag.toFixed(2)}</td>
+                    <td className="py-1.5 pr-4">{c.delta.toFixed(2)}</td>
+                    <td className={`py-1.5 pr-4 ${c.ecgHit ? 'font-bold text-[#dc2626]' : ''}`}>{c.ecgMag !== null ? c.ecgMag.toFixed(2) : '—'}</td>
+                    <td className={`py-1.5 pr-4 ${c.pcgHit ? 'font-bold text-[#dc2626]' : ''}`}>{c.pcgMag !== null ? c.pcgMag.toFixed(2) : '—'}</td>
+                    <td className="py-1.5">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${hit ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                        {hit ? 'ABNORMAL' : 'NORMAL'}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </main>

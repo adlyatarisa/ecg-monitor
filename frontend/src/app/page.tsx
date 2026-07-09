@@ -37,7 +37,7 @@ const WS_URL_HISTORICAL = 'ws://localhost:8080';
 const COMMON_BAUDS = [9600, 38400, 115200, 230400];
 
 // ─── Sample Rates ───
-const SAMPLE_RATE_STM32 = 500;       // STM32 ECG/PCG at 500 Hz
+const SAMPLE_RATE_STM32 = 1000;      // ECG/PCG FFT window @ 1000 Hz (mirror reaches 1000 Hz)
 const SAMPLE_RATE_HISTORICAL = 1000; // Historical data from ecg_0_1000hz.dat @ 1000 Hz
 const SAMPLE_RATE_HEALTHY = 1000;    // WFDB 103003_ECG, native 1000 Hz
 
@@ -349,8 +349,15 @@ const buildFFTChartOptions = (accentColor: string, maxFreq: number): ChartOption
       ticks: {
         color: accentColor,
         font: { size: 9, weight: 600 },
-        maxTicksLimit: 10,
+        maxTicksLimit: 3,
         callback: (v: any) => `${v}`,
+      },
+      afterBuildTicks: (axis: any) => {
+        axis.ticks = [
+          { value: 0 },
+          { value: Math.round(maxFreq / 2) },
+          { value: maxFreq },
+        ];
       },
       title: {
         display: true,

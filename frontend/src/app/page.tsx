@@ -268,7 +268,7 @@ interface DeviationFreq {
 // Finds the top-N frequency bins where the stroke-reference and healthy-reference
 // spectra diverge the most. These become the "watch list" frequencies used to
 // screen the live ECG/PCG signals for a stroke-like pattern.
-function computeDeviationFrequencies(strokeFFT: FFTResult, healthyFFT: FFTResult, topN: number): DeviationFreq[] {
+function computeEcholocationTargetFrequencies(strokeFFT: FFTResult, healthyFFT: FFTResult, topN: number): DeviationFreq[] {
   const len = Math.min(strokeFFT.freqs.length, healthyFFT.freqs.length);
   if (len === 0) return [];
 
@@ -283,7 +283,7 @@ function computeDeviationFrequencies(strokeFFT: FFTResult, healthyFFT: FFTResult
 }
 
 // Nearest-bin magnitude lookup; returns null if the target frequency is beyond
-// what this FFT result covers (e.g. PCG FFT is capped at 500 Hz).
+// what this FFT result covers.
 function findMagnitudeAtFreq(fft: FFTResult, targetFreq: number): number | null {
   if (fft.freqs.length === 0) return null;
   if (targetFreq > fft.freqs[fft.freqs.length - 1]) return null;
@@ -313,11 +313,11 @@ interface StrokeDetectionResult {
 // magnitude — i.e. the live spectrum looks more like the stroke pattern than the
 // healthy one at that specific frequency. Any hit triggers an abnormal flag.
 function detectStrokeIndication(
-  deviationFreqs: DeviationFreq[],
+  targetFreqs: DeviationFreq[],
   ecgFFT: FFTResult,
   pcgFFT: FFTResult
 ): StrokeDetectionResult {
-  const checks: DeviationCheck[] = deviationFreqs.map(dev => {
+  const checks: DeviationCheck[] = targetFreqs.map(dev => {
     const ecgMag = findMagnitudeAtFreq(ecgFFT, dev.freq);
     const pcgMag = findMagnitudeAtFreq(pcgFFT, dev.freq);
     const closerToStroke = (liveMag: number | null) =>
@@ -530,7 +530,7 @@ export default function Dashboard() {
     [useRaw, stm32RawBuffer, stm32Buffer]
   );
   const pcgFFT = useMemo(
-    () => computeFFTMagnitude(useRaw ? pcgRawBuffer : pcgBuffer, SAMPLE_RATE_STM32, 500),
+    () => computeFFTMagnitude(useRaw ? pcgRawBuffer : pcgBuffer, SAMPLE_RATE_STM32, 1000),
     [useRaw, pcgRawBuffer, pcgBuffer]
   );
   const healthyFFT = useMemo(
@@ -538,14 +538,14 @@ export default function Dashboard() {
     [healthyBuffer]
   );
 
-  // ─── Pearson Correlation (FFT Historical ↔ FFT PCG) ───
+  // ─── Pearson Correlation (FFT ECG live ↔ FFT PCG live) ───
   const pearsonR = useMemo(() => {
-    const hMag = historicalFFT.magnitudes;
+    const eMag = ecgFFT.magnitudes;
     const pMag = pcgFFT.magnitudes;
-    if (hMag.length === 0 || pMag.length === 0) return NaN;
-    const len = Math.min(hMag.length, pMag.length);
-    return pearsonCorrelation(hMag.slice(0, len), pMag.slice(0, len));
-  }, [historicalFFT, pcgFFT]);
+    if (eMag.length === 0 || pMag.length === 0) return NaN;
+    const len = Math.min(eMag.length, pMag.length);
+    return pearsonCorrelation(eMag.slice(0, len), pMag.slice(0, len));
+  }, [ecgFFT, pcgFFT]);
   const risk = useMemo(() => riskFromCorrelation(pearsonR), [pearsonR]);
 
   // ─── Pearson Correlation (FFT Stroke-Ref ↔ FFT Healthy-Ref) ───
@@ -557,20 +557,20 @@ export default function Dashboard() {
     return pearsonCorrelation(sMag.slice(0, len), hMag.slice(0, len));
   }, [historicalFFT, healthyFFT]);
 
-  // ─── Deviation frequencies (stroke-ref vs healthy-ref) + live detection ───
-  const deviationFreqs = useMemo(
-    () => computeDeviationFrequencies(historicalFFT, healthyFFT, 5),
+  // ─── Echolocation target frequencies (stroke-ref vs healthy-ref) + live detection ───
+  const echolocationTargetFreqs = useMemo(
+    () => computeEcholocationTargetFrequencies(historicalFFT, healthyFFT, 5),
     [historicalFFT, healthyFFT]
   );
   const strokeDetection = useMemo(
-    () => detectStrokeIndication(deviationFreqs, ecgFFT, pcgFFT),
-    [deviationFreqs, ecgFFT, pcgFFT]
+    () => detectStrokeIndication(echolocationTargetFreqs, ecgFFT, pcgFFT),
+    [echolocationTargetFreqs, ecgFFT, pcgFFT]
   );
 
   // FFT chart options (memoized)
   const historicalFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 1000), []);
   const ecgFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 1000), []);
-  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 500), []);
+  const pcgFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 1000), []);
   const healthyFFTOptions = useMemo(() => buildFFTChartOptions('#2563eb', 1000), []);
 
   // 1. Fetch Ports
@@ -898,7 +898,7 @@ export default function Dashboard() {
         />
         <FFTChartCard
           title="PCG FFT"
-          subtitle={`Frequency Spectrum · Window 3s · 0–500 Hz${useRaw ? ' · Raw' : ''}`}
+          subtitle={`Frequency Spectrum · Window 3s · 0–1000 Hz${useRaw ? ' · Raw' : ''}`}
           fftData={pcgFFT}
           accentColor="#2563eb"
           bgColor="#f0f9ff"
@@ -916,7 +916,7 @@ export default function Dashboard() {
             <TrendingUp size={20} className="text-[#2563eb]" />
             <p className="text-[14px] font-bold text-[#1e3a8a] uppercase tracking-wider">Stroke Risk Correlation</p>
           </div>
-          <p className="text-[11px] text-[#3b82f6] mt-1">FFT Spectrum Correlation · Historical ↔ PCG</p>
+          <p className="text-[11px] text-[#3b82f6] mt-1">FFT Spectrum Correlation · ECG live ↔ PCG live</p>
 
           <div className="flex items-center gap-3 mt-6">
             <div className="flex items-baseline gap-1">
@@ -956,7 +956,7 @@ export default function Dashboard() {
               Stroke-Ref ↔ Healthy-Ref Similarity · Pearson r = {isNaN(strokeHealthyR) ? '—' : strokeHealthyR.toFixed(4)}
             </p>
             <p className="text-[10px] font-semibold text-[#3b82f6] mt-1">
-              Watch-list: top {deviationFreqs.length} frequencies where stroke-ref and healthy-ref spectra diverge most
+              Watch-list: top {echolocationTargetFreqs.length} frequencies where stroke-ref and healthy-ref spectra diverge most
             </p>
           </div>
           <div
